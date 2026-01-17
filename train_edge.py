@@ -457,7 +457,12 @@ def main():
     # =========================================================================
     # OPTIMIZER SETUP
     # =========================================================================
-    torch.set_float32_matmul_precision('high')
+    # OPTIMIZATION: Enable TF32 for matmuls (H100/A100) and cuDNN auto-tuning
+    torch.set_float32_matmul_precision('high')  # Allows TF32 on Tensor Cores
+    torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 for matmuls
+    torch.backends.cudnn.allow_tf32 = True        # Enable TF32 for cuDNN ops
+    torch.backends.cudnn.benchmark = True         # Auto-tune convolution algorithms
+    
     optimizer = raw_model.configure_optimizers(
         weight_decay=args.weight_decay,
         learning_rate=args.max_lr,
