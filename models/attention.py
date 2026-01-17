@@ -53,7 +53,10 @@ FLASH_MLA_AVAILABLE = True  # We implemented SDPA version of FlashMLA
 
 class NaiveHybridAttention(nn.Module):
     """
-    Naive PyTorch implementation of Hybrid Sliding Window + Global attention.
+    Naive PyTorch implementation of Hybrid Sliding Window + Global GQA attention.
+    
+    Implements Grouped Query Attention (GQA) where multiple query heads share
+    fewer KV heads. This reduces KV cache size while maintaining expressiveness.
     
     Optimized to use:
     - Cached causal/window masks (avoids CPU loop overhead)
@@ -68,12 +71,16 @@ class NaiveHybridAttention(nn.Module):
         self.is_global = config.is_global_layer(layer_idx)
         
         self.n_heads = config.n_heads
+        self.n_kv_heads = config.n_kv_heads
+        self.n_rep = config.n_rep  # Number of times to repeat KV heads
         self.head_dim = config.head_dim
         self.window_size = config.window_size
         
-        # OPTIMIZATION: Combined QKV projection (3 matmuls fused into 1)
-        # Reduces kernel launches and improves memory bandwidth utilization
-        self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
+        # GQA: Separate Q and KV projections
+        # Q: d_model -> n_heads * head_dim
+        # K,V: d_model -> n_kv_heads * head_dim (smaller!)
+        self.q_proj = nn.Linear(config.d_model, config.n_heads * config.head_dim, bias=False)
+        self.kv_proj = nn.Linear(config.d_model, 2 * config.n_kv_heads * config.head_dim, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         
         # RoPE
@@ -105,17 +112,25 @@ class NaiveHybridAttention(nn.Module):
         """
         B, S, D = x.shape
         
-        # Project to QKV
-        qkv = self.qkv_proj(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+        # GQA Projections
+        q = self.q_proj(x)  # (B, S, n_heads * head_dim)
+        kv = self.kv_proj(x)  # (B, S, 2 * n_kv_heads * head_dim)
+        k, v = kv.chunk(2, dim=-1)
         
-        # Reshape for multi-head attention: (B, S, D) -> (B, nh, S, hd)
-        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        # Reshape for multi-head attention
+        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)      # (B, n_heads, S, head_dim)
+        k = k.view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)   # (B, n_kv_heads, S, head_dim)
+        v = v.view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)   # (B, n_kv_heads, S, head_dim)
         
-        # Apply RoPE
+        # Apply RoPE (before expanding KV heads)
         q, k = self.rope(q, k, position_ids)
+        
+        # GQA: Repeat KV heads to match Q heads
+        # (B, n_kv_heads, S, head_dim) -> (B, n_heads, S, head_dim)
+        if self.n_rep > 1:
+            k = k.repeat_interleave(self.n_rep, dim=1)
+            v = v.repeat_interleave(self.n_rep, dim=1)
+
         
         # Handle KV cache for generation
         # CRITICAL: For local (SWA) layers, we implement a ROLLING BUFFER
@@ -219,8 +234,9 @@ class NaiveHybridAttention(nn.Module):
 
 class FlexHybridAttention(nn.Module):
     """
-    Optimized Hybrid attention using torch flex_attention API.
+    Optimized Hybrid GQA attention using torch flex_attention API.
     
+    Uses Grouped Query Attention where multiple query heads share fewer KV heads.
     Requires H100/A100 with PyTorch 2.5+ and compiled kernels.
     Falls back to NaiveHybridAttention if flex_attention unavailable.
     """
@@ -236,15 +252,20 @@ class FlexHybridAttention(nn.Module):
         self.is_global = config.is_global_layer(layer_idx)
         
         self.n_heads = config.n_heads
+        self.n_kv_heads = config.n_kv_heads
+        self.n_rep = config.n_rep
         self.head_dim = config.head_dim
         self.window_size = config.window_size
         self.block_size = config.block_size  # Fixed training sequence length
         
-        self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
+        # GQA: Separate Q and KV projections
+        self.q_proj = nn.Linear(config.d_model, config.n_heads * config.head_dim, bias=False)
+        self.kv_proj = nn.Linear(config.d_model, 2 * config.n_kv_heads * config.head_dim, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         
         self.rope = RotaryEmbedding(self.head_dim, config.block_size, config.rope_base)
         self.out_proj.RESIDUAL_SCALE_INIT = True
+
         
         # OPTIMIZATION: Block Mask Caching (10x speedup!)
         # create_block_mask() is a graph-compilation operation that's VERY expensive.
@@ -295,14 +316,24 @@ class FlexHybridAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, S, D = x.shape
         
-        qkv = self.qkv_proj(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+        # GQA Projections
+        q = self.q_proj(x)
+        kv = self.kv_proj(x)
+        k, v = kv.chunk(2, dim=-1)
         
+        # Reshape for multi-head attention
         q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)
         
+        # Apply RoPE (before expanding KV heads)
         q, k = self.rope(q, k, position_ids)
+        
+        # GQA: Repeat KV heads to match Q heads
+        if self.n_rep > 1:
+            k = k.repeat_interleave(self.n_rep, dim=1)
+            v = v.repeat_interleave(self.n_rep, dim=1)
+
         
         # Note: flex_attention is primarily for training (no KV cache)
         # For generation, fall back to naive with rolling buffer
@@ -369,6 +400,7 @@ class FlashSWAHybridAttention(nn.Module):
     
     Uses flash_attn_func with window_size parameter for O(n * window) complexity.
     Mathematically identical to SWA but ~3x faster than flex_attention.
+    Uses Grouped Query Attention (GQA) where multiple query heads share fewer KV heads.
     
     Requires: pip install flash-attn (H100/A100 only)
     """
@@ -384,10 +416,14 @@ class FlashSWAHybridAttention(nn.Module):
         self.is_global = config.is_global_layer(layer_idx)
         
         self.n_heads = config.n_heads
+        self.n_kv_heads = config.n_kv_heads
+        self.n_rep = config.n_rep
         self.head_dim = config.head_dim
         self.window_size = config.window_size
         
-        self.qkv_proj = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
+        # GQA: Separate Q and KV projections
+        self.q_proj = nn.Linear(config.d_model, config.n_heads * config.head_dim, bias=False)
+        self.kv_proj = nn.Linear(config.d_model, 2 * config.n_kv_heads * config.head_dim, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         
         self.rope = RotaryEmbedding(self.head_dim, config.block_size, config.rope_base)
@@ -402,21 +438,31 @@ class FlashSWAHybridAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, S, D = x.shape
         
-        # Project to QKV
-        qkv = self.qkv_proj(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+        # GQA Projections
+        q = self.q_proj(x)
+        kv = self.kv_proj(x)
+        k, v = kv.chunk(2, dim=-1)
         
         # Reshape: (B, S, D) -> (B, S, nh, hd) for flash_attn format
         q = q.view(B, S, self.n_heads, self.head_dim)
-        k = k.view(B, S, self.n_heads, self.head_dim)
-        v = v.view(B, S, self.n_heads, self.head_dim)
+        k = k.view(B, S, self.n_kv_heads, self.head_dim)
+        v = v.view(B, S, self.n_kv_heads, self.head_dim)
         
-        # Apply RoPE (flash_attn expects (B, S, nh, hd) format)
+        # Apply RoPE (flash_attn expects (B, S, nh, hd) format, but RoPE needs (B, nh, S, hd))
         q = q.transpose(1, 2)  # (B, nh, S, hd) for RoPE
         k = k.transpose(1, 2)
         q, k = self.rope(q, k, position_ids)
+        
+        # GQA: Repeat KV heads to match Q heads (before transpose back)
+        if self.n_rep > 1:
+            k = k.repeat_interleave(self.n_rep, dim=1)
+            v_expanded = v.transpose(1, 2).repeat_interleave(self.n_rep, dim=1)
+        else:
+            v_expanded = v.transpose(1, 2)
+        
         q = q.transpose(1, 2)  # Back to (B, S, nh, hd) for flash_attn
         k = k.transpose(1, 2)
+        v = v_expanded.transpose(1, 2)  # (B, S, n_heads, hd)
         
         # Training path: use flash_attn with native sliding window
         # flash_attn expects (B, S, nh, hd) format and returns same
@@ -424,8 +470,8 @@ class FlashSWAHybridAttention(nn.Module):
             # Inference fallback: use SDPA (flash_attn doesn't support KV cache directly)
             q = q.transpose(1, 2)  # (B, nh, S, hd)
             k = k.transpose(1, 2)
-            v = v.transpose(1, 2).transpose(1, 2).transpose(1, 2)  # Same
-            v = v.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+            v = v.transpose(1, 2)
+
             
             if kv_cache is not None:
                 past_k, past_v = kv_cache

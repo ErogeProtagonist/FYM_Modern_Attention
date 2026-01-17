@@ -19,7 +19,8 @@ class ModelConfig:
     # Core architecture (same for both models to ensure fair comparison)
     d_model: int = 1024          # Hidden dimension
     n_layers: int = 24           # Number of transformer layers
-    n_heads: int = 16            # Number of attention heads
+    n_heads: int = 16            # Number of query attention heads
+    n_kv_heads: int = 4          # Number of KV heads (for GQA). If None, uses n_heads (MHA)
     head_dim: int = 64           # Dimension per head (d_model // n_heads)
     vocab_size: int = 50304      # Vocabulary size (padded for efficiency)
     block_size: int = 2048       # Maximum sequence length
@@ -48,7 +49,10 @@ class ModelConfig:
     
     def __post_init__(self):
         assert self.d_model % self.n_heads == 0, "d_model must be divisible by n_heads"
+        assert self.n_heads % self.n_kv_heads == 0, "n_heads must be divisible by n_kv_heads for GQA"
         self.head_dim = self.d_model // self.n_heads
+        self.n_rep = self.n_heads // self.n_kv_heads  # Number of times to repeat KV heads
+
         
     @property
     def ffn_hidden_dim(self) -> int:
@@ -68,9 +72,10 @@ HYBRID_500M = ModelConfig(
     model_type="hybrid",
     d_model=1280,
     n_layers=24,
-    n_heads=20,
+    n_heads=20,            # 20 query heads
+    n_kv_heads=4,          # 4 KV heads (5:1 GQA ratio, like Gemma 2/3)
     window_size=512,
-    global_layer_period=6,  # 5:1 ratio
+    global_layer_period=6,  # 5:1 local:global ratio
 )
 
 MLA_500M = ModelConfig(
@@ -78,6 +83,7 @@ MLA_500M = ModelConfig(
     d_model=1280,
     n_layers=24,
     n_heads=20,
+    n_kv_heads=20,         # MLA uses full MHA (GQA not applicable - uses latent compression instead)
     kv_lora_rank=512,
     rope_dim=64,
 )
