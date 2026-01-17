@@ -198,13 +198,16 @@ def get_lr(step, warmup_steps, max_steps, max_lr, min_lr):
 # GPU PROFILE DETECTION
 # =============================================================================
 
-def get_gpu_profile():
+def get_gpu_profile(device_idx=None):
     """
     Detect GPU and return optimal training settings.
     
     Note: Batch sizes must evenly divide total_batch_size / (T * world_size).
     With T=2048 and total_batch_size=524288, valid batch sizes are:
     1, 2, 4, 8, 16, 32, 64, 128, 256
+    
+    Args:
+        device_idx: GPU device index (for DDP). If None, uses current device.
     
     Returns:
         dict with keys: name, vram_gb, batch_size, use_checkpointing, profile
@@ -218,8 +221,10 @@ def get_gpu_profile():
             "profile": "cpu"
         }
     
-    # Get GPU properties
-    props = torch.cuda.get_device_properties(0)
+    # Get GPU properties for current device (DDP-safe)
+    if device_idx is None:
+        device_idx = torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device_idx)
     vram_gb = props.total_memory / (1024**3)
     name = props.name
     
