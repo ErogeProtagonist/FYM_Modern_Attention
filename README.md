@@ -1,32 +1,51 @@
 # Yadda - Efficient Attention Research
 
-Comparative study of 500M parameter transformers:
-- **Hybrid SWA** (Gemma-style): Sliding Window + Global Attention
-- **MLA** (DeepSeek-style): Multi-Head Latent Attention
+Comparative study of 500M parameter transformers for edge deployment:
+- **Hybrid SWA** (Gemma-style): Alternating Sliding Window + Global GQA Attention
+- **MLA** (DeepSeek-style): Multi-Head Latent Attention with KV compression
+
+## Project Structure
+
+```
+yadda/
+├── models/          # Core model implementations
+│   ├── attention.py # Hybrid SWA + MLA attention mechanisms
+│   ├── transformer.py # Main Transformer with checkpointing
+│   ├── config.py    # 500M model configurations
+│   └── rope.py      # Rotary Positional Embeddings
+├── scripts/         # Training and inference scripts
+│   ├── train_edge.py      # DDP training (H100/H200)
+│   ├── inference.py       # Portable inference + benchmarking
+│   └── edu_fineweb10B.py  # FineWeb-Edu dataset tokenization
+├── archive/         # Old experiments (for reference)
+└── log/             # Checkpoints and training logs
+```
 
 ## Quick Start
 
-### Training on Lambda H100 Cluster
+### Training on H200 (Recommended)
 ```bash
-# MLA Model
-torchrun --standalone --nproc_per_node=8 train_edge.py --model_type mla --compile
+cd scripts
+# Single GPU with auto-optimization
+python train_edge.py --model_type hybrid --auto_optimize --compile
 
-# Hybrid Model  
-torchrun --standalone --nproc_per_node=8 train_edge.py --model_type hybrid --compile
+# Multi-GPU DDP
+torchrun --standalone --nproc_per_node=8 train_edge.py --model_type mla --auto_optimize --compile
 ```
 
-### Inference on Local GPU (RTX 3090)
+### Inference on Local GPU
 ```bash
-python inference.py --checkpoint log/mla_05000.pt --interactive
+cd scripts
+python inference.py --checkpoint ../log/hybrid_05000.pt --interactive
 ```
 
 ## Data Preparation
 ```bash
-python edu_fineweb10B.py --output_dir /lambda/nfs/riddy/edu_fineweb10B
+cd scripts
+python edu_fineweb10B.py --output_dir /path/to/edu_fineweb10B
 ```
 
-## Files
-- `models/` - Core model implementations (config, attention, transformer)
-- `train_edge.py` - DDP training script
-- `inference.py` - Portable inference with benchmarking
-- `edu_fineweb10B.py` - FineWeb-Edu tokenization
+## Key Features
+- **Auto-optimization**: Detects GPU (H200/H100/A100/3090) and adjusts batch size + checkpointing
+- **Model checkpoints**: Saved every 5000 steps to `log/{model_type}_{step:05d}.pt`
+- **Dual-path training**: Uses FlexAttention/FlashAttention for training, naive PyTorch for portable inference

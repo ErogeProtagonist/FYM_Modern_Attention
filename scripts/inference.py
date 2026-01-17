@@ -8,12 +8,18 @@ Usage:
     python inference.py --checkpoint log/hybrid_05000.pt --prompt "Hello, I am"
 """
 
+import os
+import sys
 import argparse
 import torch
 import tiktoken
 
+# Add parent directory to path for models import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from models.config import ModelConfig
 from models.transformer import Transformer
+
 
 
 def load_model(checkpoint_path: str, device: str = "cuda") -> tuple:

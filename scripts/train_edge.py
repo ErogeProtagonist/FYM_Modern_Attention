@@ -15,12 +15,16 @@ Usage:
 """
 
 import os
+import sys
 import math
 import time
 import argparse
 import threading
 import queue
 from dataclasses import asdict
+
+# Add parent directory to path for models import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
@@ -32,9 +36,10 @@ import torch.distributed as dist
 import numpy as np
 import tiktoken
 
-# Import our models
+# Import our models (from parent/models/)
 from models.config import ModelConfig, HYBRID_500M, MLA_500M
 from models.transformer import Transformer
+
 
 
 # =============================================================================
