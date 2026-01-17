@@ -202,6 +202,10 @@ def get_gpu_profile():
     """
     Detect GPU and return optimal training settings.
     
+    Note: Batch sizes must evenly divide total_batch_size / (T * world_size).
+    With T=2048 and total_batch_size=524288, valid batch sizes are:
+    1, 2, 4, 8, 16, 32, 64, 128, 256
+    
     Returns:
         dict with keys: name, vram_gb, batch_size, use_checkpointing, profile
     """
@@ -221,12 +225,13 @@ def get_gpu_profile():
     
     # Determine profile based on VRAM
     # B200: 192GB, H200: 141GB, H100: 80GB, A100: 40/80GB, RTX 3090: 24GB
+    # Batch sizes must be powers of 2 or valid divisors of 256
     if vram_gb >= 180:
         # B200 (192GB) - No checkpointing needed, max batch size
         return {
             "name": name,
             "vram_gb": vram_gb,
-            "batch_size": 32,
+            "batch_size": 64,  # Max that fits in 192GB
             "use_checkpointing": False,
             "profile": "b200"
         }
@@ -235,7 +240,7 @@ def get_gpu_profile():
         return {
             "name": name,
             "vram_gb": vram_gb,
-            "batch_size": 24,
+            "batch_size": 32,  # Conservative for 141GB without checkpointing
             "use_checkpointing": False,
             "profile": "h200"
         }
@@ -253,7 +258,7 @@ def get_gpu_profile():
         return {
             "name": name,
             "vram_gb": vram_gb,
-            "batch_size": 12,
+            "batch_size": 8,
             "use_checkpointing": True,
             "profile": "a100"
         }
