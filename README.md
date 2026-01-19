@@ -1,4 +1,4 @@
-# Yadda - Efficient Attention Research
+# FYM - Efficient Attention Research
 
 Comparative study of 500M parameter transformers for edge deployment:
 - **Hybrid SWA** (Gemma-style): Alternating Sliding Window + Global GQA Attention
