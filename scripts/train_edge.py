@@ -414,15 +414,11 @@ def main():
     model = Transformer(config, mode=mode, use_checkpointing=use_checkpointing)
     model.to(device)
     
-    if args.compile:
-        if master_process:
-            print("Compiling model with torch.compile...")
-        model = torch.compile(model)
+    # NOTE: torch.compile is applied AFTER checkpoint loading (see below)
+    # This is critical for resume functionality - loading into a compiled model breaks flex_attention
     
-    if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
-    
-    raw_model = model.module if ddp else model
+    # Get raw model reference BEFORE any wrapping
+    raw_model = model
 
     # =========================================================================
     # DATA LOADER SETUP
@@ -502,6 +498,18 @@ def main():
             print(f"Resumed from step {start_step - 1}, continuing from step {start_step}")
             if checkpoint.get('val_loss'):
                 print(f"Last validation loss: {checkpoint['val_loss']:.4f}")
+
+    # =========================================================================
+    # APPLY TORCH.COMPILE AND DDP (AFTER CHECKPOINT LOADING)
+    # =========================================================================
+    # This ordering is CRITICAL: loading state_dict into a compiled model breaks flex_attention
+    if args.compile:
+        if master_process:
+            print("Compiling model with torch.compile...")
+        model = torch.compile(model)
+    
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
 
     # =========================================================================
     # TRAINING LOOP
