@@ -490,7 +490,15 @@ def main():
         if master_process:
             print(f"Resuming from checkpoint: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
-        raw_model.load_state_dict(checkpoint['model'])
+        
+        # Handle checkpoints saved from compiled models (keys have '_orig_mod.' prefix)
+        state_dict = checkpoint['model']
+        if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+            if master_process:
+                print("Detected compiled model checkpoint, stripping '_orig_mod.' prefix...")
+            state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+        
+        raw_model.load_state_dict(state_dict)
         if 'optimizer' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
         start_step = checkpoint.get('step', 0) + 1  # Resume from next step
