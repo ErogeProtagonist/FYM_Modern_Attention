@@ -24,11 +24,15 @@ from .rope import RotaryEmbedding, apply_rotary_pos_emb, apply_rotary_pos_emb_si
 
 # Optimized kernels are now built-in via SDPA (torch 2.0+)
 try:
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    from torch.nn.attention.flex_attention import flex_attention as _flex_attention, create_block_mask
+    # CRITICAL: Compile flex_attention at import time to generate fused kernels
+    # Without this, resume breaks because torch.compile(model) doesn't trace into flex_attention
+    flex_attention = torch.compile(_flex_attention)
     FLEX_AVAILABLE = True
 except ImportError:
     try:
-        from torch.nn.attention.flex import flex_attention, create_block_mask
+        from torch.nn.attention.flex import flex_attention as _flex_attention, create_block_mask
+        flex_attention = torch.compile(_flex_attention)
         FLEX_AVAILABLE = True
     except ImportError:
         FLEX_AVAILABLE = False
