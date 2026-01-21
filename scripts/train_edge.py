@@ -299,8 +299,8 @@ def main():
                         help="Maximum training steps (~1 epoch for 10B tokens)")
     parser.add_argument("--val_interval", type=int, default=250,
                         help="Validation interval")
-    parser.add_argument("--save_interval", type=int, default=5000,
-                        help="Checkpoint save interval")
+    parser.add_argument("--save_interval", type=int, default=1000,
+                        help="Checkpoint save interval (default: 1000 for Colab-friendly frequent saves)")
     parser.add_argument("--batch_size", type=int, default=None,
                         help="Micro batch size per GPU (auto-detected if --auto_optimize)")
     parser.add_argument("--total_batch_size", type=int, default=524288,
@@ -319,6 +319,8 @@ def main():
                         help="Auto-detect GPU and use optimal settings (batch size, checkpointing)")
     parser.add_argument("--no_checkpointing", action="store_true",
                         help="Disable gradient checkpointing (requires more VRAM, faster training)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume from (e.g., log/hybrid_05000.pt)")
     args = parser.parse_args()
 
     # =========================================================================
@@ -480,16 +482,33 @@ def main():
     os.makedirs(args.log_dir, exist_ok=True)
     log_file = os.path.join(args.log_dir, f"log_{args.model_type}.txt")
     if master_process:
-        with open(log_file, "w") as f:
+        with open(log_file, "a" if args.resume else "w") as f:  # Append if resuming
             f.write(f"Training {args.model_type} model\n")
             f.write(f"Config: {asdict(config)}\n\n")
+
+    # =========================================================================
+    # RESUME FROM CHECKPOINT
+    # =========================================================================
+    start_step = 0
+    if args.resume:
+        if master_process:
+            print(f"Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        raw_model.load_state_dict(checkpoint['model'])
+        if 'optimizer' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+        start_step = checkpoint.get('step', 0) + 1  # Resume from next step
+        if master_process:
+            print(f"Resumed from step {start_step - 1}, continuing from step {start_step}")
+            if checkpoint.get('val_loss'):
+                print(f"Last validation loss: {checkpoint['val_loss']:.4f}")
 
     # =========================================================================
     # TRAINING LOOP
     # =========================================================================
     enc = tiktoken.get_encoding("gpt2")
     
-    for step in range(args.max_steps):
+    for step in range(start_step, args.max_steps):
         t0 = time.time()
         last_step = (step == args.max_steps - 1)
 
@@ -529,6 +548,7 @@ def main():
             checkpoint_path = os.path.join(args.log_dir, f"{args.model_type}_{step:05d}.pt")
             checkpoint = {
                 'model': raw_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
                 'config': asdict(config),
                 'step': step,
                 'val_loss': val_loss_accum.item() if 'val_loss_accum' in dir() else None,
