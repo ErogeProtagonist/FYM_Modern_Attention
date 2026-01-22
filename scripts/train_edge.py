@@ -414,11 +414,26 @@ def main():
     model = Transformer(config, mode=mode, use_checkpointing=use_checkpointing)
     model.to(device)
     
-    # NOTE: torch.compile is applied AFTER checkpoint loading (see below)
-    # This is critical for resume functionality - loading into a compiled model breaks flex_attention
+    # =========================================================================
+    # APPLY TORCH.COMPILE BEFORE LOADING CHECKPOINT
+    # =========================================================================
+    # This ordering is CRITICAL: compile FIRST, then load weights into underlying model
+    # Compiling after loading breaks flex_attention kernel generation
+    if args.compile:
+        if master_process:
+            print("Compiling model with torch.compile...")
+        model = torch.compile(model)
     
-    # Get raw model reference BEFORE any wrapping
-    raw_model = model
+    # Get reference to underlying model for state_dict operations
+    # For compiled models, use _orig_mod; for DDP, use .module; otherwise use model directly
+    if args.compile:
+        raw_model = model._orig_mod
+    else:
+        raw_model = model
+    
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
+        # Note: for DDP, raw_model is already set correctly above
 
     # =========================================================================
     # DATA LOADER SETUP
@@ -504,20 +519,6 @@ def main():
         start_step = checkpoint.get('step', 0) + 1  # Resume from next step
         if master_process:
             print(f"Resumed from step {start_step - 1}, continuing from step {start_step}")
-            if checkpoint.get('val_loss'):
-                print(f"Last validation loss: {checkpoint['val_loss']:.4f}")
-
-    # =========================================================================
-    # APPLY TORCH.COMPILE AND DDP (AFTER CHECKPOINT LOADING)
-    # =========================================================================
-    # This ordering is CRITICAL: loading state_dict into a compiled model breaks flex_attention
-    if args.compile:
-        if master_process:
-            print("Compiling model with torch.compile...")
-        model = torch.compile(model)
-    
-    if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
 
     # =========================================================================
     # TRAINING LOOP
