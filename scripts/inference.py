@@ -39,8 +39,14 @@ def load_model(checkpoint_path: str, device: str = "cuda") -> tuple:
     # Create model in inference mode (forces naive kernels)
     model = Transformer(config, mode="inference")
     
+    # Handle checkpoints saved from compiled models (keys have '_orig_mod.' prefix)
+    state_dict = checkpoint['model']
+    if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+        print("Detected compiled model checkpoint, stripping '_orig_mod.' prefix...")
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+    
     # Load weights
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
     
