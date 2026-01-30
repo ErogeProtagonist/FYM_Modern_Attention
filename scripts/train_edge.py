@@ -233,11 +233,14 @@ def get_gpu_profile(device_idx=None):
     vram_gb = props.total_memory / (1024**3)
     name = props.name
     
-    # Determine profile based on VRAM
+    # Determine profile based on GPU name and VRAM
     # B200: 192GB, H200: 141GB, H100: 80GB, A100: 40/80GB, RTX 3090: 24GB
     # Batch sizes must be powers of 2 or valid divisors of 256
-    if vram_gb >= 180:
+    name_upper = name.upper()
+    
+    if "B200" in name_upper or vram_gb >= 180:
         # B200 (192GB) - No checkpointing needed, max batch size
+        # Note: B200 may report ~178GB due to reserved memory
         return {
             "name": name,
             "vram_gb": vram_gb,
@@ -245,7 +248,7 @@ def get_gpu_profile(device_idx=None):
             "use_checkpointing": False,
             "profile": "b200"
         }
-    elif vram_gb >= 130:
+    elif "H200" in name_upper or vram_gb >= 130:
         # H200 (141GB) - No checkpointing needed, large batch size
         return {
             "name": name,
