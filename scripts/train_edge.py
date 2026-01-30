@@ -435,7 +435,13 @@ def main():
         raw_model = model
     
     if ddp:
+        # Sync all CUDA operations before DDP wrapping
+        torch.cuda.synchronize()
+        if master_process:
+            print(f"Wrapping model with DDP on rank {ddp_rank}...")
         model = DDP(model, device_ids=[ddp_local_rank])
+        if master_process:
+            print("DDP wrapping complete!")
         # Note: for DDP, raw_model is already set correctly above
 
     # =========================================================================
