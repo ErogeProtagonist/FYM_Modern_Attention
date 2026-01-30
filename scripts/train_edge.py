@@ -239,12 +239,12 @@ def get_gpu_profile(device_idx=None):
     name_upper = name.upper()
     
     if "B200" in name_upper or vram_gb >= 180:
-        # B200 (192GB) - No checkpointing needed, max batch size
-        # Note: B200 may report ~178GB due to reserved memory
+        # B200 (192GB) - No checkpointing needed
+        # Note: B200 may report ~178GB due to reserved memory, batch 64 is too large
         return {
             "name": name,
             "vram_gb": vram_gb,
-            "batch_size": 64,  # Max that fits in 192GB
+            "batch_size": 32,  # Batch 64 needs ~190GB, 32 fits in 178GB
             "use_checkpointing": False,
             "profile": "b200"
         }
