@@ -45,6 +45,13 @@ def load_model(checkpoint_path: str, device: str = "cuda") -> tuple:
         print("Detected compiled model checkpoint, stripping '_orig_mod.' prefix...")
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
     
+    # Handle MLA checkpoints saved from FlashMLAttention wrapper
+    # Training uses FlashMLAttention which wraps NaiveMLAttention as 'naive_impl'
+    # Inference uses NaiveMLAttention directly, so strip the wrapper prefix
+    if any('.naive_impl.' in k for k in state_dict.keys()):
+        print("Detected FlashMLA training checkpoint, stripping 'naive_impl.' prefix...")
+        state_dict = {k.replace('.naive_impl.', '.'): v for k, v in state_dict.items()}
+    
     # Load weights
     model.load_state_dict(state_dict)
     model.to(device)
