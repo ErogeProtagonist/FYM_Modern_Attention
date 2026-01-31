@@ -631,12 +631,15 @@ class NaiveMLAttention(nn.Module):
         
         new_cache = (c_kv, k_rope) if use_cache else None
         
-        # Up-project keys and values from latent space (chunking the fused projection)
-        kv_content = self.kv_up_proj(c_kv) # (B, S_kv, 2 * n_heads * head_dim)
-        k_content, v = kv_content.chunk(2, dim=-1)
-        
-        k_content = k_content.view(B, -1, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, -1, self.n_heads, self.head_dim).transpose(1, 2)
+        # Up-project keys and values from latent space
+        # CRITICAL: Must reshape BEFORE chunking to match FlashMLAttention training
+        # Training does: view(B, S, n_heads, 2*head_dim) then chunk(2, dim=-1)
+        # This gives interleaved [k,v] per head, not contiguous [all_k, all_v]
+        kv_content = self.kv_up_proj(c_kv)  # (B, S_kv, 2 * n_heads * head_dim)
+        S_kv = kv_content.shape[1]
+        kv_content = kv_content.view(B, S_kv, self.n_heads, 2 * self.head_dim).transpose(1, 2)
+        # Shape: (B, n_heads, S_kv, 2 * head_dim)
+        k_content, v = kv_content.chunk(2, dim=-1)  # Each: (B, n_heads, S_kv, head_dim)
 
         
         # === Attention Computation ===
