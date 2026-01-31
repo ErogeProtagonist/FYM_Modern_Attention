@@ -640,10 +640,11 @@ def main():
         tokens_per_sec = tokens_processed / dt
         
         if master_process:
-            print(f"step {step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.2e} | "
-                  f"norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:,.0f}")
+            log_line = (f"step {step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.2e} | "
+                       f"norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:,.0f}")
+            print(log_line)
             with open(log_file, "a") as f:
-                f.write(f"{step} train {loss_accum.item():.6f}\n")
+                f.write(log_line + "\n")
 
     # =========================================================================
     # CLEANUP
