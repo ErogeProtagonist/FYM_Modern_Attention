@@ -494,7 +494,7 @@ def main():
                 # Logging
                 if step % args.log_interval == 0:
                     avg_loss = running_loss / args.log_interval
-                    dt = (time.time() - t0) * 1000 / args.grad_accum
+                    dt = (time.time() - t0) * 1000 / grad_accum
                     elapsed = time.time() - t_start
                     
                     # Calculate throughput
