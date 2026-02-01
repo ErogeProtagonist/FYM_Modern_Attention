@@ -137,9 +137,10 @@ class PrefetchedWrapper:
 
 class SFTDataLoader:
     """
-    Dataloader for JSONL SFT data with proper prompt/completion masking.
+    High-performance dataloader for SFT data.
     
-    Only computes loss on completion tokens (prompt tokens masked with -100).
+    OPTIMIZATION: Pre-builds all data as tensors at startup.
+    This eliminates the Python list → tensor conversion bottleneck.
     """
     
     def __init__(
@@ -157,98 +158,87 @@ class SFTDataLoader:
         self.device = device
         self.shuffle = shuffle
         
-        # Load all examples
-        self.examples = []
+        # Load and tokenize all examples
+        examples = []
         with open(data_path, "r", encoding="utf-8") as f:
             for line in f:
-                example = json.loads(line.strip())
-                self.examples.append(example)
+                examples.append(json.loads(line.strip()))
         
-        print(f"Loaded {len(self.examples)} examples from {data_path}")
+        print(f"Loaded {len(examples)} examples from {data_path}")
         
-        # Pre-tokenize for efficiency
-        self._tokenize_all()
+        # Pre-tokenize and pad all examples
+        print("Pre-tokenizing and building tensor cache...")
+        all_tokens = []
+        all_labels = []
         
-        self.indices = list(range(len(self.tokenized_examples)))
-        if self.shuffle:
-            import random
-            random.shuffle(self.indices)
-        self.current_idx = 0
-    
-    def _tokenize_all(self):
-        """Pre-tokenize all examples for faster training."""
-        self.tokenized_examples = []
-        
-        for ex in self.examples:
+        for ex in examples:
             prompt = ex["prompt"]
             completion = ex["completion"]
             
-            # Tokenize separately to know where prompt ends
-            # allowed_special="all" handles ChatML tokens like <|im_start|>, <|im_end|>
-            prompt_tokens = self.tokenizer.encode(prompt, allowed_special="all")
-            completion_tokens = self.tokenizer.encode(completion, allowed_special="all")
+            # Tokenize (allow ChatML special tokens)
+            prompt_tokens = tokenizer.encode(prompt, allowed_special="all")
+            completion_tokens = tokenizer.encode(completion, allowed_special="all")
             
-            # Add EOS at end
-            full_tokens = prompt_tokens + completion_tokens + [self.tokenizer.eot_token]
+            # Build sequence with EOS
+            full_tokens = prompt_tokens + completion_tokens + [tokenizer.eot_token]
             
-            # Create labels: -100 for prompt, actual tokens for completion
+            # Build labels: -100 for prompt, actual tokens for completion
             labels = (
-                [-100] * len(prompt_tokens) +  # Mask prompt
-                completion_tokens +             # Train on completion
-                [self.tokenizer.eot_token]      # Train on EOS
+                [-100] * len(prompt_tokens) +
+                completion_tokens +
+                [tokenizer.eot_token]
             )
             
             # Truncate if needed
-            if len(full_tokens) > self.block_size:
-                full_tokens = full_tokens[:self.block_size]
-                labels = labels[:self.block_size]
+            if len(full_tokens) > block_size:
+                full_tokens = full_tokens[:block_size]
+                labels = labels[:block_size]
             
-            self.tokenized_examples.append({
-                "tokens": full_tokens,
-                "labels": labels
-            })
+            # Pad to block_size
+            pad_len = block_size - len(full_tokens)
+            if pad_len > 0:
+                full_tokens = full_tokens + [tokenizer.eot_token] * pad_len
+                labels = labels + [-100] * pad_len
+            
+            all_tokens.append(full_tokens)
+            all_labels.append(labels)
+        
+        # Convert to tensors ONCE at startup (this is the key optimization)
+        # Using int32 saves memory bandwidth (like pre-training)
+        self.tokens = torch.tensor(all_tokens, dtype=torch.int32)
+        self.labels = torch.tensor(all_labels, dtype=torch.int32)
+        self.num_examples = len(all_tokens)
+        
+        print(f"Built tensor cache: {self.tokens.shape} ({self.tokens.nbytes / 1e9:.2f} GB)")
+        
+        # Shuffle indices
+        self.indices = torch.randperm(self.num_examples) if shuffle else torch.arange(self.num_examples)
+        self.current_idx = 0
     
     def reset(self):
         """Reset for new epoch."""
         if self.shuffle:
-            import random
-            random.shuffle(self.indices)
+            self.indices = torch.randperm(self.num_examples)
         self.current_idx = 0
     
     def __len__(self):
-        return len(self.tokenized_examples) // self.batch_size
+        return self.num_examples // self.batch_size
     
     def next_batch(self):
-        """Get next batch with proper padding."""
-        batch_tokens = []
-        batch_labels = []
+        """Get next batch using fast tensor indexing."""
+        # Handle wraparound
+        if self.current_idx + self.batch_size > self.num_examples:
+            self.current_idx = 0
+            if self.shuffle:
+                self.indices = torch.randperm(self.num_examples)
         
-        for _ in range(self.batch_size):
-            if self.current_idx >= len(self.indices):
-                self.current_idx = 0
-                if self.shuffle:
-                    import random
-                    random.shuffle(self.indices)
-            
-            idx = self.indices[self.current_idx]
-            self.current_idx += 1
-            
-            ex = self.tokenized_examples[idx]
-            tokens = ex["tokens"].copy()
-            labels = ex["labels"].copy()
-            
-            # Pad to block_size
-            pad_len = self.block_size - len(tokens)
-            if pad_len > 0:
-                tokens = tokens + [self.tokenizer.eot_token] * pad_len
-                labels = labels + [-100] * pad_len  # Don't train on padding
-            
-            batch_tokens.append(tokens)
-            batch_labels.append(labels)
+        # Get batch indices
+        batch_indices = self.indices[self.current_idx : self.current_idx + self.batch_size]
+        self.current_idx += self.batch_size
         
-        # Convert to tensors (keep on CPU for prefetcher to handle)
-        x = torch.tensor(batch_tokens, dtype=torch.long)
-        y = torch.tensor(batch_labels, dtype=torch.long)
+        # Fast tensor indexing (no Python loops!)
+        x = self.tokens[batch_indices].to(torch.long)  # Cast to long for embedding
+        y = self.labels[batch_indices].to(torch.long)
         
         return x, y
 
