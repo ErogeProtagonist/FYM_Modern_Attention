@@ -35,8 +35,8 @@ import time
 import argparse
 from dataclasses import asdict
 
-# Add yadda to path
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "yadda"))
+# Add parent directory to path for models import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
@@ -45,6 +45,42 @@ import tiktoken
 
 from models.config import ModelConfig
 from models.transformer import Transformer
+
+
+# =============================================================================
+# GPU PROFILE DETECTION (same as train_edge.py)
+# =============================================================================
+
+def get_gpu_profile():
+    """
+    Detect GPU and return optimal SFT settings.
+    
+    Returns:
+        dict with keys: name, vram_gb, batch_size, profile
+    """
+    if not torch.cuda.is_available():
+        return {
+            "name": "CPU",
+            "vram_gb": 0,
+            "batch_size": 2,
+            "profile": "cpu"
+        }
+    
+    props = torch.cuda.get_device_properties(0)
+    vram_gb = props.total_memory / (1024**3)
+    name = props.name.upper()
+    
+    # B200: 192GB, H200: 141GB, H100: 80GB, A100: 40/80GB, 3090: 24GB
+    if "B200" in name or vram_gb >= 180:
+        return {"name": props.name, "vram_gb": vram_gb, "batch_size": 32, "profile": "b200"}
+    elif "H200" in name or vram_gb >= 130:
+        return {"name": props.name, "vram_gb": vram_gb, "batch_size": 32, "profile": "h200"}
+    elif vram_gb >= 70:
+        return {"name": props.name, "vram_gb": vram_gb, "batch_size": 16, "profile": "h100"}
+    elif vram_gb >= 35:
+        return {"name": props.name, "vram_gb": vram_gb, "batch_size": 8, "profile": "a100"}
+    else:
+        return {"name": props.name, "vram_gb": vram_gb, "batch_size": 4, "profile": "consumer"}
 
 
 class SFTDataLoader:
@@ -240,10 +276,10 @@ def main():
     # Training
     parser.add_argument("--epochs", type=int, default=3,
                         help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=4,
-                        help="Micro batch size per GPU")
-    parser.add_argument("--grad_accum", type=int, default=4,
-                        help="Gradient accumulation steps")
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="Micro batch size (auto-detected if --auto_optimize)")
+    parser.add_argument("--total_batch_size", type=int, default=65536,
+                        help="Target total batch size in tokens (~64k for SFT)")
     parser.add_argument("--lr", type=float, default=2e-5,
                         help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=2e-6,
@@ -254,6 +290,8 @@ def main():
                         help="Weight decay")
     parser.add_argument("--max_grad_norm", type=float, default=1.0,
                         help="Max gradient norm for clipping")
+    parser.add_argument("--auto_optimize", action="store_true",
+                        help="Auto-detect GPU and use optimal batch size")
     
     # Logging
     parser.add_argument("--log_interval", type=int, default=10,
@@ -288,12 +326,39 @@ def main():
         device = args.device
     
     print(f"Using device: {device}")
-    if device == "cuda":
-        print(f"GPU: {torch.cuda.get_device_name()}")
-        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    
+    # =========================================================================
+    # GPU PROFILE AND AUTO-OPTIMIZATION
+    # =========================================================================
+    gpu_profile = get_gpu_profile()
+    
+    if args.auto_optimize or args.batch_size is None:
+        args.batch_size = gpu_profile["batch_size"]
+        print(f"\n{'='*60}")
+        print(f"AUTO-OPTIMIZE: Detected {gpu_profile['name']}")
+        print(f"  VRAM: {gpu_profile['vram_gb']:.1f} GB")
+        print(f"  Profile: {gpu_profile['profile'].upper()}")
+        print(f"  Micro Batch Size: {args.batch_size}")
+        print(f"{'='*60}")
+    else:
+        print(f"GPU: {gpu_profile['name']} ({gpu_profile['vram_gb']:.1f} GB)")
     
     # Load model
     model, config = load_pretrained_model(args.checkpoint, device)
+    
+    # Calculate gradient accumulation from total_batch_size
+    T = config.block_size
+    tokens_per_micro = args.batch_size * T
+    
+    if args.total_batch_size % tokens_per_micro != 0:
+        # Find closest valid total_batch_size
+        grad_accum = max(1, args.total_batch_size // tokens_per_micro)
+        actual_total = tokens_per_micro * grad_accum
+        print(f"Note: Adjusted total_batch_size from {args.total_batch_size} to {actual_total}")
+    else:
+        grad_accum = args.total_batch_size // tokens_per_micro
+    
+    print(f"Gradient accumulation: {grad_accum} (total_batch={args.batch_size * grad_accum * T:,} tokens)")
     
     # Compile if requested
     if args.compile and device == "cuda":
@@ -322,9 +387,9 @@ def main():
     )
     
     # Calculate steps
-    steps_per_epoch = len(train_loader) // args.grad_accum
+    steps_per_epoch = len(train_loader) // grad_accum
     total_steps = steps_per_epoch * args.epochs
-    effective_batch_size = args.batch_size * args.grad_accum
+    effective_batch_size = args.batch_size * grad_accum
     
     print(f"\n{'='*60}")
     print("Training Configuration")
@@ -333,8 +398,8 @@ def main():
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Epochs: {args.epochs}")
     print(f"Micro batch size: {args.batch_size}")
-    print(f"Gradient accumulation: {args.grad_accum}")
-    print(f"Effective batch size: {effective_batch_size}")
+    print(f"Gradient accumulation: {grad_accum}")
+    print(f"Effective batch size: {effective_batch_size} sequences ({effective_batch_size * T:,} tokens)")
     print(f"Steps per epoch: {steps_per_epoch}")
     print(f"Total optimizer steps: {total_steps}")
     print(f"Learning rate: {args.lr} -> {args.min_lr}")
@@ -367,8 +432,9 @@ def main():
         "model_type": config.model_type,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
-        "grad_accum": args.grad_accum,
+        "grad_accum": grad_accum,
         "lr": args.lr,
+        "total_batch_size": args.batch_size * grad_accum * T,
         "total_steps": total_steps
     }
     with open(os.path.join(args.output_dir, "train_config.json"), "w") as f:
@@ -401,15 +467,15 @@ def main():
             # Forward pass with autocast
             with torch.autocast(device_type=device, dtype=torch.bfloat16):
                 loss = compute_sft_loss(model, x, y)
-                loss = loss / args.grad_accum  # Scale for accumulation
+                loss = loss / grad_accum  # Scale for accumulation
             
             # Backward pass
             loss.backward()
-            running_loss += loss.item() * args.grad_accum
+            running_loss += loss.item() * grad_accum
             micro_step += 1
             
             # Optimizer step after accumulation
-            if micro_step % args.grad_accum == 0:
+            if micro_step % grad_accum == 0:
                 # Clip gradients
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 
@@ -431,12 +497,12 @@ def main():
                     elapsed = time.time() - t_start
                     
                     # Calculate throughput
-                    tokens_per_step = args.batch_size * args.grad_accum * config.block_size
-                    tokens_per_sec = tokens_per_step / (dt * args.grad_accum / 1000)
+                    tokens_per_step = args.batch_size * grad_accum * config.block_size
+                    tokens_per_sec = tokens_per_step / (dt * grad_accum / 1000)
                     
                     # ETA calculation
                     steps_remaining = total_steps - step
-                    eta_seconds = steps_remaining * (dt * args.grad_accum / 1000)
+                    eta_seconds = steps_remaining * (dt * grad_accum / 1000)
                     eta_str = f"{eta_seconds/60:.0f}m" if eta_seconds < 3600 else f"{eta_seconds/3600:.1f}h"
                     
                     print(f"step {step:5d}/{total_steps} | loss: {avg_loss:.4f} | "
