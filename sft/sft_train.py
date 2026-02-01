@@ -132,8 +132,9 @@ class SFTDataLoader:
             completion = ex["completion"]
             
             # Tokenize separately to know where prompt ends
-            prompt_tokens = self.tokenizer.encode(prompt)
-            completion_tokens = self.tokenizer.encode(completion)
+            # allowed_special="all" handles ChatML tokens like <|im_start|>, <|im_end|>
+            prompt_tokens = self.tokenizer.encode(prompt, allowed_special="all")
+            completion_tokens = self.tokenizer.encode(completion, allowed_special="all")
             
             # Add EOS at end
             full_tokens = prompt_tokens + completion_tokens + [self.tokenizer.eot_token]
