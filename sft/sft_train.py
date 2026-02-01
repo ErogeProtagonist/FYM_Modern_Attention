@@ -331,6 +331,8 @@ def main():
                         help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=None,
                         help="Micro batch size (auto-detected if --auto_optimize)")
+    parser.add_argument("--grad_accum", type=int, default=None,
+                        help="Gradient accumulation steps (auto-calculated if not set)")
     parser.add_argument("--total_batch_size", type=int, default=65536,
                         help="Target total batch size in tokens (~64k for SFT)")
     parser.add_argument("--lr", type=float, default=2e-5,
