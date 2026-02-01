@@ -80,7 +80,7 @@ def get_gpu_profile():
     elif vram_gb >= 35:
         return {"name": props.name, "vram_gb": vram_gb, "batch_size": 8, "profile": "a100"}
     else:
-        return {"name": props.name, "vram_gb": vram_gb, "batch_size": 4, "profile": "consumer"}
+        return {"name": props.name, "vram_gb": vram_gb, "batch_size": 2, "profile": "consumer"}
 
 
 # =============================================================================
