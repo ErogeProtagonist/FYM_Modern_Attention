@@ -83,6 +83,58 @@ def get_gpu_profile():
         return {"name": props.name, "vram_gb": vram_gb, "batch_size": 4, "profile": "consumer"}
 
 
+# =============================================================================
+# ASYNC PREFETCHING (same as train_edge.py)
+# =============================================================================
+
+import threading
+import queue
+
+class PrefetchedWrapper:
+    """
+    Async Data Prefetching - loads next batch in background thread.
+    Combined with pin_memory() and non_blocking transfers.
+    """
+    def __init__(self, loader, device, prefetch_factor=2):
+        self.loader = loader
+        self.device = device
+        self.queue = queue.Queue(maxsize=prefetch_factor)
+        self.stop_event = threading.Event()
+        self.loader_thread = threading.Thread(target=self._worker, daemon=True)
+        self.loader_thread.start()
+        
+    def _worker(self):
+        while not self.stop_event.is_set():
+            try:
+                x, y = self.loader.next_batch()
+                # pin_memory enables async DMA from CPU->GPU
+                if x.device.type == 'cpu':
+                    x = x.pin_memory()
+                    y = y.pin_memory()
+                self.queue.put((x, y))
+            except Exception as e:
+                print(f"Error in prefetch worker: {e}")
+                self.stop_event.set()
+                return
+
+    def next_batch(self):
+        x, y = self.queue.get()
+        # non_blocking=True overlaps transfer with GPU compute
+        if self.device != 'cpu':
+            x = x.to(self.device, non_blocking=True)
+            y = y.to(self.device, non_blocking=True)
+        return x, y
+        
+    def reset(self):
+        # Drain queue and reset loader
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except:
+                pass
+        self.loader.reset()
+
+
 class SFTDataLoader:
     """
     Dataloader for JSONL SFT data with proper prompt/completion masking.
@@ -194,9 +246,9 @@ class SFTDataLoader:
             batch_tokens.append(tokens)
             batch_labels.append(labels)
         
-        # Convert to tensors
-        x = torch.tensor(batch_tokens, dtype=torch.long, device=self.device)
-        y = torch.tensor(batch_labels, dtype=torch.long, device=self.device)
+        # Convert to tensors (keep on CPU for prefetcher to handle)
+        x = torch.tensor(batch_tokens, dtype=torch.long)
+        y = torch.tensor(batch_labels, dtype=torch.long)
         
         return x, y
 
@@ -378,17 +430,21 @@ def main():
         print("Run sft_data_prep.py first to prepare the dataset.")
         sys.exit(1)
     
-    train_loader = SFTDataLoader(
+    train_loader_inner = SFTDataLoader(
         train_path, tokenizer, config.block_size, 
         args.batch_size, device, shuffle=True
     )
-    val_loader = SFTDataLoader(
+    val_loader_inner = SFTDataLoader(
         val_path, tokenizer, config.block_size,
         args.batch_size, device, shuffle=False
     )
     
-    # Calculate steps
-    steps_per_epoch = len(train_loader) // grad_accum
+    # Wrap with async prefetching for overlapped GPU transfer
+    train_loader = PrefetchedWrapper(train_loader_inner, device)
+    val_loader = val_loader_inner  # Val doesn't need prefetch (small batches)
+    
+    # Calculate steps (use inner loader for len since wrapper doesn't have it)
+    steps_per_epoch = len(train_loader_inner) // grad_accum
     total_steps = steps_per_epoch * args.epochs
     effective_batch_size = args.batch_size * grad_accum
     
@@ -459,7 +515,7 @@ def main():
         
         train_loader.reset()
         
-        for batch_idx in range(len(train_loader)):
+        for batch_idx in range(len(train_loader_inner)):
             t0 = time.time()
             
             # Get batch
@@ -521,6 +577,7 @@ def main():
                     with torch.no_grad():
                         for _ in range(val_batches):
                             x, y = val_loader.next_batch()
+                            x, y = x.to(device), y.to(device)  # Manual transfer for val
                             with torch.autocast(device_type=device, dtype=torch.bfloat16):
                                 loss = compute_sft_loss(model, x, y)
                             val_loss += loss.item()
