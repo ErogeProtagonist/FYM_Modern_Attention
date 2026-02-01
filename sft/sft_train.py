@@ -399,17 +399,21 @@ def main():
     # Load model
     model, config = load_pretrained_model(args.checkpoint, device)
     
-    # Calculate gradient accumulation from total_batch_size
+    # Calculate gradient accumulation
+    # Priority: 1. Manual --grad_accum  2. Auto-calc from --total_batch_size
     T = config.block_size
     tokens_per_micro = args.batch_size * T
     
-    if args.total_batch_size % tokens_per_micro != 0:
-        # Find closest valid total_batch_size
-        grad_accum = max(1, args.total_batch_size // tokens_per_micro)
-        actual_total = tokens_per_micro * grad_accum
-        print(f"Note: Adjusted total_batch_size from {args.total_batch_size} to {actual_total}")
+    if args.grad_accum is not None:
+        grad_accum = args.grad_accum
+        print(f"Manual gradient accumulation: {grad_accum}")
     else:
-        grad_accum = args.total_batch_size // tokens_per_micro
+        if args.total_batch_size % tokens_per_micro != 0:
+            grad_accum = max(1, args.total_batch_size // tokens_per_micro)
+            actual_total = tokens_per_micro * grad_accum
+            print(f"Note: Adjusted total_batch_size from {args.total_batch_size} to {actual_total}")
+        else:
+            grad_accum = args.total_batch_size // tokens_per_micro
     
     print(f"Gradient accumulation: {grad_accum} (total_batch={args.batch_size * grad_accum * T:,} tokens)")
     
