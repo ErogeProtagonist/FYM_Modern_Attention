@@ -791,11 +791,13 @@ def get_attention(
     
     if config.model_type == "hybrid":
         if mode == "train":
-            # Priority: Flex > FlashSWA > Naive (flex performs better with cached mask)
-            if FLEX_AVAILABLE:
-                attn_cls = FlexHybridAttention
-            elif FLASH_ATTN_AVAILABLE:
+            # Priority: FlashSWA > Flex > Naive 
+            # FlashSWA uses flash_attn native sliding window (fastest)
+            # Flex uses Triton kernels with block_mask (slower on some hardware)
+            if FLASH_ATTN_AVAILABLE:
                 attn_cls = FlashSWAHybridAttention
+            elif FLEX_AVAILABLE:
+                attn_cls = FlexHybridAttention
             else:
                 attn_cls = NaiveHybridAttention
         else:
