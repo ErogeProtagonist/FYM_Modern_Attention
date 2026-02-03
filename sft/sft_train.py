@@ -513,7 +513,9 @@ def main():
         train_loader.reset()
         
         for batch_idx in range(len(train_loader_inner)):
-            t0 = time.time()
+            # Only start timing at the beginning of each optimizer step
+            if micro_step % grad_accum == 0:
+                t0 = time.time()
             
             # Get batch
             x, y = train_loader.next_batch()
