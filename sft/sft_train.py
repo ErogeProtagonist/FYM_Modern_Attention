@@ -135,6 +135,95 @@ class PrefetchedWrapper:
         self.loader.reset()
 
 
+class SFTShardLoader:
+    """
+    High-performance dataloader using memory-mapped binary shards.
+    
+    OPTIMIZATION: Uses numpy memmap for zero-copy loading.
+    Much faster than JSONL → tensor conversion.
+    """
+    
+    def __init__(
+        self,
+        shard_dir: str,
+        split: str,
+        batch_size: int,
+        shuffle: bool = True
+    ):
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        
+        # Load metadata
+        metadata_path = os.path.join(shard_dir, f"sft_{split}_metadata.json")
+        with open(metadata_path, "r") as f:
+            self.metadata = json.load(f)
+        
+        self.num_examples = self.metadata["num_examples"]
+        self.block_size = self.metadata["block_size"]
+        self.num_shards = self.metadata["num_shards"]
+        
+        print(f"Loading {split} shards: {self.num_examples} examples, {self.num_shards} shards")
+        
+        # Memory-map all shards
+        self.tokens_data = []
+        self.labels_data = []
+        
+        for shard_idx in range(self.num_shards):
+            tokens_path = os.path.join(shard_dir, f"sft_{split}_{shard_idx:05d}_tokens.bin")
+            labels_path = os.path.join(shard_dir, f"sft_{split}_{shard_idx:05d}_labels.bin")
+            
+            # Memory-map the files (zero-copy!)
+            tokens = np.memmap(tokens_path, dtype=np.uint16, mode='r')
+            labels = np.memmap(labels_path, dtype=np.int32, mode='r')
+            
+            # Reshape to (num_examples, block_size)
+            shard_examples = len(tokens) // self.block_size
+            tokens = tokens.reshape(shard_examples, self.block_size)
+            labels = labels.reshape(shard_examples, self.block_size)
+            
+            self.tokens_data.append(tokens)
+            self.labels_data.append(labels)
+        
+        # Flatten for easier indexing
+        self.tokens = np.concatenate(self.tokens_data, axis=0)
+        self.labels = np.concatenate(self.labels_data, axis=0)
+        
+        print(f"Loaded {len(self.tokens)} examples from shards")
+        
+        # Shuffle indices
+        self.indices = np.arange(len(self.tokens))
+        if shuffle:
+            np.random.shuffle(self.indices)
+        self.current_idx = 0
+    
+    def reset(self):
+        """Reset for new epoch."""
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+        self.current_idx = 0
+    
+    def __len__(self):
+        return len(self.tokens) // self.batch_size
+    
+    def next_batch(self):
+        """Get next batch using fast numpy indexing."""
+        # Handle wraparound
+        if self.current_idx + self.batch_size > len(self.tokens):
+            self.current_idx = 0
+            if self.shuffle:
+                np.random.shuffle(self.indices)
+        
+        # Get batch indices
+        batch_indices = self.indices[self.current_idx : self.current_idx + self.batch_size]
+        self.current_idx += self.batch_size
+        
+        # Fast numpy indexing -> torch tensor
+        x = torch.from_numpy(self.tokens[batch_indices].astype(np.int64))
+        y = torch.from_numpy(self.labels[batch_indices].astype(np.int64))
+        
+        return x, y
+
+
 class SFTDataLoader:
     """
     High-performance dataloader for SFT data.
@@ -338,6 +427,10 @@ def main():
                         help="Max gradient norm for clipping")
     parser.add_argument("--auto_optimize", action="store_true",
                         help="Auto-detect GPU and use optimal batch size")
+    parser.add_argument("--use_shards", action="store_true",
+                        help="Use pre-converted binary shards (much faster)")
+    parser.add_argument("--shard_dir", type=str, default=None,
+                        help="Directory containing binary shards (required if --use_shards)")
     
     # Logging
     parser.add_argument("--log_interval", type=int, default=10,
@@ -419,22 +512,34 @@ def main():
     tokenizer = tiktoken.get_encoding("gpt2")
     
     # Setup data loaders
-    train_path = os.path.join(args.data_dir, "sft_train.jsonl")
-    val_path = os.path.join(args.data_dir, "sft_val.jsonl")
-    
-    if not os.path.exists(train_path):
-        print(f"ERROR: Training data not found at {train_path}")
-        print("Run sft_data_prep.py first to prepare the dataset.")
-        sys.exit(1)
-    
-    train_loader_inner = SFTDataLoader(
-        train_path, tokenizer, config.block_size, 
-        args.batch_size, device, shuffle=True
-    )
-    val_loader_inner = SFTDataLoader(
-        val_path, tokenizer, config.block_size,
-        args.batch_size, device, shuffle=False
-    )
+    if args.use_shards:
+        # Use fast memory-mapped shards
+        shard_dir = args.shard_dir or os.path.join(args.data_dir, "shards")
+        if not os.path.exists(shard_dir):
+            print(f"ERROR: Shard directory not found at {shard_dir}")
+            print("Run sft_to_shards.py first to convert JSONL to shards.")
+            sys.exit(1)
+        
+        train_loader_inner = SFTShardLoader(shard_dir, "train", args.batch_size, shuffle=True)
+        val_loader_inner = SFTShardLoader(shard_dir, "val", args.batch_size, shuffle=False)
+    else:
+        # Use JSONL loader (slower but works without preprocessing)
+        train_path = os.path.join(args.data_dir, "sft_train.jsonl")
+        val_path = os.path.join(args.data_dir, "sft_val.jsonl")
+        
+        if not os.path.exists(train_path):
+            print(f"ERROR: Training data not found at {train_path}")
+            print("Run sft_data_prep.py first to prepare the dataset.")
+            sys.exit(1)
+        
+        train_loader_inner = SFTDataLoader(
+            train_path, tokenizer, config.block_size, 
+            args.batch_size, device, shuffle=True
+        )
+        val_loader_inner = SFTDataLoader(
+            val_path, tokenizer, config.block_size,
+            args.batch_size, device, shuffle=False
+        )
     
     # Wrap with async prefetching for overlapped GPU transfer
     train_loader = PrefetchedWrapper(train_loader_inner, device)
