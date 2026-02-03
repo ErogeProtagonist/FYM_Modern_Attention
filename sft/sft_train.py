@@ -253,7 +253,8 @@ def load_pretrained_model(checkpoint_path: str, device: str):
     config = ModelConfig(**config_dict)
     
     # Create model in training mode (uses optimized attention)
-    model = Transformer(config, mode="train")
+    # Disable checkpointing - model is small enough and it conflicts with FlexAttention on Windows
+    model = Transformer(config, mode="train", use_checkpointing=False)
     
     # Handle compiled model checkpoints
     state_dict = checkpoint['model']
