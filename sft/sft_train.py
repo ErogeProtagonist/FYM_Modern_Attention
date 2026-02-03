@@ -253,24 +253,10 @@ def load_pretrained_model(checkpoint_path: str, device: str):
     config_dict = checkpoint['config']
     config = ModelConfig(**config_dict)
     
-    # Auto-detect mode based on OS/Hardware
-    # Windows/Consumer GPUs -> "inference" (Naive/SDPA) to avoid Triton crashes
-    # Linux/Data Center GPUs -> "train" (Flex/FlashMLA) for speed
-    if platform.system() == "Windows":
-        print("Platform is Windows: Forcing mode='inference' (Naive Attention) to avoid Triton crashes.")
-        mode = "inference"
-    elif not torch.cuda.is_available():
-        mode = "inference"
-    else:
-        # Check for data center GPU
-        props = torch.cuda.get_device_properties(0)
-        name = props.name.upper()
-        if "H100" in name or "A100" in name or "B200" in name:
-            mode = "train"
-        else:
-            mode = "inference"
-            
-    print(f"Model Mode: {mode.upper()}")
+    # TEMPORARY: Force inference mode to debug FlexAttention slowdown
+    # TODO: Investigate why FlexHybridAttention is 3x slower than NaiveHybridAttention
+    mode = "inference"
+    print(f"Model Mode: {mode.upper()} (FORCED for debugging)")
     
     # Create model
     # Disable checkpointing - model is small enough and it conflicts with FlexAttention on Windows
