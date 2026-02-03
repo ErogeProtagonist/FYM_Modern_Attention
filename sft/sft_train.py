@@ -546,7 +546,7 @@ def main():
                 
                 # Logging
                 if step % args.log_interval == 0:
-                    avg_loss = running_loss / args.log_interval
+                    avg_loss = running_loss / (args.log_interval * grad_accum)  # Divide by total micro-batches
                     dt = (time.time() - t0) * 1000 / grad_accum
                     elapsed = time.time() - t_start
                     
