@@ -263,10 +263,9 @@ def load_pretrained_model(checkpoint_path: str, device: str):
         print("Stripping '_orig_mod.' prefix from compiled checkpoint...")
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
     
-    # Handle MLA wrapper prefix
-    if any('.naive_impl.' in k for k in state_dict.keys()):
-        print("Stripping 'naive_impl.' prefix from FlashMLA checkpoint...")
-        state_dict = {k.replace('.naive_impl.', '.'): v for k, v in state_dict.items()}
+    # NOTE: For MLA, both pre-training and SFT use FlashMLAttention which wraps NaiveMLAttention
+    # as 'naive_impl', so keys already match. No stripping needed here.
+    # (Stripping is only needed for inference.py which loads into NaiveMLAttention directly)
     
     model.load_state_dict(state_dict)
     model.to(device)
