@@ -293,6 +293,11 @@ class FlexHybridAttention(nn.Module):
             return self._cached_block_mask
         
         # Create new block mask (expensive operation - should only happen once per unique seq_len)
+        # DEBUG: Log cache misses to identify recompilation issues
+        if self.layer_idx == 0:  # Only log for first layer to avoid spam
+            print(f"[DEBUG] Block mask cache MISS: layer={self.layer_idx}, seq_len={seq_len}, "
+                  f"cached={'None' if self._cached_block_mask is None else self._cached_block_mask.shape[-1]}")
+        
         block_mask = create_block_mask(
             self._block_mask_fn,
             B=None, H=None,
@@ -303,6 +308,8 @@ class FlexHybridAttention(nn.Module):
         # Cache it for training (fixed block_size)
         if seq_len == self.block_size:
             self._cached_block_mask = block_mask
+            if self.layer_idx == 0:
+                print(f"[DEBUG] Block mask cached for seq_len={seq_len}")
             
         return block_mask
 

@@ -253,14 +253,9 @@ def load_pretrained_model(checkpoint_path: str, device: str):
     config_dict = checkpoint['config']
     config = ModelConfig(**config_dict)
     
-    # TEMPORARY: Force inference mode to debug FlexAttention slowdown
-    # TODO: Investigate why FlexHybridAttention is 3x slower than NaiveHybridAttention
-    mode = "inference"
-    print(f"Model Mode: {mode.upper()} (FORCED for debugging)")
-    
-    # Create model
+    # Create model in training mode for optimized attention kernels
     # Disable checkpointing - model is small enough and it conflicts with FlexAttention on Windows
-    model = Transformer(config, mode=mode, use_checkpointing=False)
+    model = Transformer(config, mode="train", use_checkpointing=False)
     
     # Handle compiled model checkpoints
     state_dict = checkpoint['model']
