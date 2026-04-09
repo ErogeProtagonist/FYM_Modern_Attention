@@ -20,7 +20,7 @@ from typing import Optional, Tuple, List
 import inspect
 
 from .config import ModelConfig
-from .attention import get_attention, FLASH_ATTN_AVAILABLE, FLASH_MLA_AVAILABLE
+from .attention import get_attention, FLASH_ATTN_AVAILABLE
 
 
 class RMSNorm(nn.Module):
@@ -157,7 +157,6 @@ class Transformer(nn.Module):
         print(f"Initialized {config.model_type.upper()} Transformer with {n_params:,} parameters")
         print(f"  - Mode: {mode}")
         print(f"  - flash_attn available: {FLASH_ATTN_AVAILABLE}")
-        print(f"  - FlashMLA available: {FLASH_MLA_AVAILABLE}")
         
     def _init_weights(self, module: nn.Module):
         """

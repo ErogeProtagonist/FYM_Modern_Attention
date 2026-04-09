@@ -1,4 +1,4 @@
-# swa-mla-500m
+# FYM_Modern_Attention
 
 **Efficiency at the Edge: Hybrid Sparsity vs. Latent Compression in 500M Transformers**
 

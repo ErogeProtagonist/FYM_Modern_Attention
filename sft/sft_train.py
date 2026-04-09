@@ -254,19 +254,26 @@ def load_pretrained_model(checkpoint_path: str, device: str):
     config = ModelConfig(**config_dict)
     
     # Create model in training mode for optimized attention kernels
-    # Disable checkpointing - model is small enough and it conflicts with FlexAttention on Windows
+    # Disable checkpointing - model is small enough
     model = Transformer(config, mode="train", use_checkpointing=False)
-    
+
     # Handle compiled model checkpoints
     state_dict = checkpoint['model']
     if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
         print("Stripping '_orig_mod.' prefix from compiled checkpoint...")
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
-    
-    # NOTE: For MLA, both pre-training and SFT use FlashMLAttention which wraps NaiveMLAttention
-    # as 'naive_impl', so keys already match. No stripping needed here.
-    # (Stripping is only needed for inference.py which loads into NaiveMLAttention directly)
-    
+
+    # Strip the legacy 'naive_impl.' prefix that older MLA checkpoints carry.
+    # Pre-training and earlier SFT runs used the FlashMLAttention wrapper class,
+    # which embedded its real layers under `<...>.attn.naive_impl.<param>`.
+    # FlashMLAttention has since been removed and MLA uses NaiveMLAttention
+    # directly, so the prefix must be dropped to match the new key layout.
+    # New checkpoints saved after this change will not contain the prefix; the
+    # `if any(...)` guard makes this a no-op for them.
+    if any('.naive_impl.' in k for k in state_dict.keys()):
+        print("Stripping legacy 'naive_impl.' prefix from MLA checkpoint...")
+        state_dict = {k.replace('.naive_impl.', '.'): v for k, v in state_dict.items()}
+
     model.load_state_dict(state_dict)
     model.to(device)
     

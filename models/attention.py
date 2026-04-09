@@ -1,14 +1,17 @@
 """
 Attention Implementations for Hybrid SWA and MLA Transformers.
 
-This module provides 4 attention variants:
-- NaiveHybridAttention: Portable inference (and training fallback) for Hybrid
+This module provides 3 attention variants:
+- NaiveHybridAttention: SDPA-based Hybrid (used for inference and as a training
+  fallback when flash_attn is unavailable)
 - FlashSWAHybridAttention: Optimized training for Hybrid via flash_attn package
-- NaiveMLAttention: Portable inference for MLA model
-- FlashMLAttention: Optimized training for MLA model
+- NaiveMLAttention: SDPA-based MLA used for both training and inference
+  (the FlashMLA package is inference-only and didn't help training, so we use
+  SDPA for everything; the no-cache forward dispatches to FlashAttention via
+  the SDPA backend selector)
 
-The factory function `get_attention()` automatically selects the best
-implementation based on hardware and mode.
+The factory function `get_attention()` selects the right implementation based
+on hardware (flash_attn availability) and mode.
 """
 
 import math
@@ -21,15 +24,13 @@ from .config import ModelConfig
 from .rope import RotaryEmbedding, apply_rotary_pos_emb, apply_rotary_pos_emb_single
 
 
-# FlashAttention-2 native sliding window (fastest option for training)
+# FlashAttention-2 native sliding window (fastest option for Hybrid training)
 try:
     from flash_attn import flash_attn_func
     FLASH_ATTN_AVAILABLE = True
 except ImportError:
     FLASH_ATTN_AVAILABLE = False
     flash_attn_func = None
-
-FLASH_MLA_AVAILABLE = True  # We implemented SDPA version of FlashMLA
 
 
 
@@ -467,10 +468,14 @@ class NaiveMLAttention(nn.Module):
 
         new_cache = (c_kv, k_rope) if use_cache else None
 
-        # Up-project keys and values from latent space
-        # CRITICAL: Must reshape BEFORE chunking to match FlashMLAttention training
-        # Training does: view(B, S, n_heads, 2*head_dim) then chunk(2, dim=-1)
-        # This gives interleaved [k,v] per head, not contiguous [all_k, all_v]
+        # Up-project keys and values from latent space.
+        # CRITICAL: reshape BEFORE chunking. view(B, S, n_heads, 2*head_dim) then
+        # chunk(2, dim=-1) gives interleaved [k,v] per head, NOT contiguous
+        # [all_k, all_v]. Getting this wrong silently produces wrong outputs
+        # (the model generates gibberish even with reasonable training loss)
+        # because the linear layer's weight order corresponds to the interleaved
+        # layout. See Training_Run_Summary_Internal.md section 2.B for the
+        # original incident — the "MLA gibberish" bug fixed in commit a13cd78.
         kv_content = self.kv_up_proj(c_kv)  # (B, S_kv, 2 * n_heads * head_dim)
         S_kv = kv_content.shape[1]
         kv_content = kv_content.view(B, S_kv, self.n_heads, 2 * self.head_dim).transpose(1, 2)
@@ -488,12 +493,12 @@ class NaiveMLAttention(nn.Module):
         q_full = torch.cat([q_content, q_rope], dim=-1)
         k_full = torch.cat([k_content, k_rope_for_attn], dim=-1)
 
-        # Fast path: when not using a KV cache (e.g. lm-eval-harness loglikelihood,
-        # or any non-cached forward), dispatch to SDPA / FlashAttention. q_len ==
-        # k_len here so is_causal=True is correct. SDPA's default scale is
-        # 1/sqrt(last_dim) = 1/sqrt(head_dim + rope_dim), which exactly matches
-        # DeepSeek's MLA scaling. This is the same path FlashMLAttention uses
-        # during training.
+        # Fast path: when not using a KV cache (e.g. training, or
+        # lm-eval-harness loglikelihood, or any non-cached forward), dispatch to
+        # SDPA / FlashAttention. q_len == k_len here so is_causal=True is
+        # correct. SDPA's default scale is 1/sqrt(last_dim) =
+        # 1/sqrt(head_dim + rope_dim), which exactly matches DeepSeek's MLA
+        # scaling.
         if kv_cache is None and not use_cache:
             with torch.nn.attention.sdpa_kernel([
                 torch.nn.attention.SDPBackend.FLASH_ATTENTION,
@@ -528,88 +533,6 @@ class NaiveMLAttention(nn.Module):
         return out, new_cache
 
 
-class FlashMLAttention(nn.Module):
-    """
-    Optimized MLA using FlashMLA kernel (requires H100/H800).
-    
-    Falls back to NaiveMLAttention if flash_mla is not available.
-    """
-    
-    def __init__(self, config: ModelConfig, layer_idx: int):
-        super().__init__()
-        
-        if not FLASH_MLA_AVAILABLE:
-            # Should not happen with SDPA implementation
-            raise RuntimeError("FlashMLA optimization not available.")
-        
-        # For now, just wrap naive implementation
-        # Full FlashMLA integration requires the flash_mla package
-        self.naive_impl = NaiveMLAttention(config, layer_idx)
-        
-    def forward(
-        self,
-        x: torch.Tensor,
-        position_ids: Optional[torch.Tensor] = None,
-        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
-        """
-        Optimized forward pass using SDPA (FlashAttention-2/3).
-        
-        This implementation is for TRAINING. It up-projects the latent KV
-        into full tensors to utilize the highly optimized FlashAttention kernels.
-        
-        Fairness Note: This produces the exact same mathematical result as 
-        NaiveMLAttention but uses hardware-accelerated kernels for O(S^2) ops.
-        """
-        # Inference fallback: if using cache, use the naive implementation 
-        # which is already optimized for KV cache memory.
-        if kv_cache is not None or use_cache:
-            return self.naive_impl(x, position_ids, kv_cache, use_cache)
-            
-        B, S, D = x.shape
-        impl = self.naive_impl
-        
-        # 1. Query Projections
-        q_content = impl.q_proj(x).view(B, S, impl.n_heads, impl.head_dim).transpose(1, 2)
-        q_rope = impl.q_rope_proj(x).view(B, S, impl.n_heads, impl.rope_dim).transpose(1, 2)
-        q_rope = impl.rope_decoupled.forward_single(q_rope, position_ids)
-        
-        # 2. Key-Value Projections (Training pass: up-project full sequence)
-        c_kv = impl.kv_down_proj(x)
-        
-        # Decoupled RoPE key (shared across heads)
-        k_rope = impl.k_rope_proj(x).unsqueeze(2).transpose(1, 2) # (B, 1, S, d_R)
-        k_rope = impl.rope_decoupled.forward_single(k_rope, position_ids)
-        k_rope = k_rope.expand(-1, impl.n_heads, -1, -1) # (B, nh, S, d_R)
-        
-        # Up-project content keys and values (fused)
-        kv_content = impl.kv_up_proj(c_kv).view(B, S, impl.n_heads, 2 * impl.head_dim).transpose(1, 2)
-        k_content, v = kv_content.chunk(2, dim=-1) # (B, nh, S, d_h)
-
-        
-        # 3. Concatenate Content and RoPE
-        # q_full: (B, nh, S, d_h + d_R)
-        # k_full: (B, nh, S, d_h + d_R)
-        q_full = torch.cat([q_content, q_rope], dim=-1)
-        k_full = torch.cat([k_content, k_rope], dim=-1)
-        
-        # 4. SDPA (This triggers FlashAttention-2/3 on H100)
-        # DeepSeek scaling: 1 / sqrt(head_dim + rope_dim)
-        # SDPA uses 1 / sqrt(last_dim) by default, which is exactly (head_dim + rope_dim)
-        with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.FLASH_ATTENTION, torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION]):
-            out = F.scaled_dot_product_attention(
-                q_full, k_full, v, 
-                is_causal=True
-            )
-        
-        # 5. Output Project
-        out = out.transpose(1, 2).contiguous().view(B, S, D)
-        out = impl.out_proj(out)
-        
-        return out, None
-
-
 # ============================================================================
 # FACTORY FUNCTION
 # ============================================================================
@@ -622,14 +545,17 @@ def get_attention(
     """
     Factory function to get the appropriate attention implementation.
 
-    Priority for Hybrid training:
-    1. FlashSWAHybridAttention (requires flash-attn package — used on cloud)
-    2. NaiveHybridAttention (SDPA fallback — works everywhere)
+    Hybrid: FlashSWAHybridAttention if flash_attn is installed (used on cloud
+    GPUs), otherwise NaiveHybridAttention SDPA fallback.
+
+    MLA: NaiveMLAttention always. The flash_mla package is inference-only and
+    didn't help training, so MLA uses SDPA for both phases — its non-cache
+    forward dispatches to FlashAttention via the SDPA backend selector.
 
     Args:
         config: Model configuration
         layer_idx: Layer index (for Hybrid layer type selection)
-        mode: "train" (use optimized kernels) or "inference" (use naive)
+        mode: "train" (use optimized kernels) or "inference"
 
     Returns:
         Attention module instance
@@ -643,10 +569,7 @@ def get_attention(
             attn_cls = NaiveHybridAttention
 
     elif config.model_type == "mla":
-        if mode == "train" and FLASH_MLA_AVAILABLE:
-            attn_cls = FlashMLAttention
-        else:
-            attn_cls = NaiveMLAttention
+        attn_cls = NaiveMLAttention
 
     else:
         raise ValueError(f"Unknown model type: {config.model_type}")

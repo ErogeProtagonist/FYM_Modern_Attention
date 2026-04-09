@@ -398,9 +398,8 @@ def main():
     if master_process:
         print(f"\n{'='*60}")
         print(f"Training {args.model_type.upper()} Transformer")
-        from models.attention import FLASH_ATTN_AVAILABLE, FLASH_MLA_AVAILABLE
+        from models.attention import FLASH_ATTN_AVAILABLE
         print(f"flash_attn available: {FLASH_ATTN_AVAILABLE}")
-        print(f"FlashMLA (SDPA) available: {FLASH_MLA_AVAILABLE}")
         print(f"Using torch.compile: {args.compile}")
         print(f"{'='*60}\n")
     
