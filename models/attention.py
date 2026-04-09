@@ -33,9 +33,6 @@ except ImportError:
     flash_attn_func = None
 
 
-
-
-
 # ============================================================================
 # HYBRID ATTENTION IMPLEMENTATIONS
 # ============================================================================
@@ -338,7 +335,6 @@ class NaiveMLAttention(nn.Module):
         # KV up-projection from latent space (Fused for speed)
         self.kv_up_proj = nn.Linear(self.kv_lora_rank, 2 * config.n_heads * config.head_dim, bias=False)
 
-        
         # Decoupled Key RoPE projection (shared across heads in DeepSeek style)
         self.k_rope_proj = nn.Linear(config.d_model, self.rope_dim, bias=False)
         

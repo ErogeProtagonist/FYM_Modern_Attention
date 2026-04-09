@@ -294,8 +294,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train Hybrid or MLA Transformer")
     parser.add_argument("--model_type", type=str, default="hybrid", choices=["hybrid", "mla"],
                         help="Model architecture: 'hybrid' (Gemma-style) or 'mla' (DeepSeek-style)")
-    parser.add_argument("--shards_dir", type=str, default="/lambda/nfs/riddy/edu_fineweb10B",
-                        help="Directory containing tokenized shards (Lambda: /lambda/nfs/riddy/edu_fineweb10B)")
+    parser.add_argument("--shards_dir", type=str, default="edu_fineweb10B",
+                        help="Directory containing tokenized FineWeb-Edu shards (see scripts/edu_fineweb10B.py)")
     parser.add_argument("--log_dir", type=str, default="log",
                         help="Directory for logs and checkpoints")
     parser.add_argument("--max_steps", type=int, default=19073,
@@ -531,7 +531,11 @@ def main():
     # TRAINING LOOP
     # =========================================================================
     enc = tiktoken.get_encoding("gpt2")
-    
+
+    # Most-recent validation loss; updated by the validation block below and
+    # read by the checkpoint block. Stays None until the first validation step.
+    val_loss_accum = None
+
     for step in range(start_step, args.max_steps):
         t0 = time.time()
         last_step = (step == args.max_steps - 1)
@@ -575,7 +579,7 @@ def main():
                 'optimizer': optimizer.state_dict(),
                 'config': asdict(config),
                 'step': step,
-                'val_loss': val_loss_accum.item() if 'val_loss_accum' in dir() else None,
+                'val_loss': val_loss_accum.item() if val_loss_accum is not None else None,
             }
             torch.save(checkpoint, checkpoint_path)
             print(f"Saved checkpoint to {checkpoint_path}")

@@ -128,76 +128,6 @@ def interactive_mode(model: Transformer, device: str = "cuda"):
             break
 
 
-def benchmark_inference(
-    model: Transformer,
-    config: ModelConfig,
-    device: str = "cuda",
-    num_tokens: int = 100,
-    num_runs: int = 5
-):
-    """
-    Benchmark inference speed and memory usage.
-    """
-    import time
-    
-    print("\n" + "="*60)
-    print("Inference Benchmark")
-    print("="*60)
-    
-    enc = tiktoken.get_encoding("gpt2")
-    prompt = "The quick brown fox jumps over the lazy dog"
-    tokens = enc.encode(prompt)
-    tokens = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
-    
-    # Warmup
-    print("Warming up...")
-    with torch.no_grad():
-        _ = model.generate(tokens, max_new_tokens=10)
-    
-    if device == "cuda":
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
-    
-    # Benchmark runs
-    times = []
-    for run in range(num_runs):
-        if device == "cuda":
-            torch.cuda.synchronize()
-        
-        start = time.perf_counter()
-        with torch.no_grad():
-            _ = model.generate(tokens.clone(), max_new_tokens=num_tokens)
-        
-        if device == "cuda":
-            torch.cuda.synchronize()
-        
-        elapsed = time.perf_counter() - start
-        times.append(elapsed)
-        print(f"  Run {run+1}: {elapsed:.3f}s ({num_tokens/elapsed:.1f} tok/s)")
-    
-    avg_time = sum(times) / len(times)
-    avg_tps = num_tokens / avg_time
-    
-    print(f"\nAverage: {avg_time:.3f}s ({avg_tps:.1f} tokens/sec)")
-    
-    if device == "cuda":
-        peak_memory = torch.cuda.max_memory_allocated() / 1024**3
-        print(f"Peak GPU memory: {peak_memory:.2f} GB")
-    
-    # KV cache size estimate
-    if config.model_type == "mla":
-        # MLA: c_kv (kv_lora_rank) + k_rope (rope_dim) per layer
-        cache_per_token = config.n_layers * (config.kv_lora_rank + config.rope_dim) * 2  # bytes (bf16)
-    else:
-        # Hybrid: varies by layer type
-        # Simplified: assume average is half global, half local
-        avg_cache = config.n_layers * config.n_heads * config.head_dim * 2 * 2  # K+V, bytes
-        # Local layers only keep window_size tokens
-        cache_per_token = avg_cache  # Simplified
-    
-    print(f"Estimated KV cache: {cache_per_token * num_tokens / 1024:.1f} KB for {num_tokens} tokens")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Inference for Hybrid/MLA Transformer")
     parser.add_argument("--checkpoint", type=str, required=True,
@@ -212,8 +142,6 @@ def main():
                         help="Top-k sampling parameter")
     parser.add_argument("--interactive", action="store_true",
                         help="Enter interactive generation mode")
-    parser.add_argument("--benchmark", action="store_true",
-                        help="Run inference benchmark")
     parser.add_argument("--device", type=str, default=None,
                         help="Device to use (auto-detected if not specified)")
     args = parser.parse_args()
@@ -233,11 +161,7 @@ def main():
     
     # Load model
     model, config = load_model(args.checkpoint, device)
-    
-    # Run benchmark if requested
-    if args.benchmark:
-        benchmark_inference(model, config, device)
-    
+
     # Interactive mode
     if args.interactive:
         interactive_mode(model, device)
@@ -257,7 +181,7 @@ def main():
         print('='*60)
     
     else:
-        print("\nNo prompt provided. Use --prompt, --interactive, or --benchmark")
+        print("\nNo prompt provided. Use --prompt or --interactive")
         print("Example: python inference.py --checkpoint log/hybrid_05000.pt --prompt 'Hello'")
 
 

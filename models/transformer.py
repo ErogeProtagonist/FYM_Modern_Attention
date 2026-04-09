@@ -209,17 +209,19 @@ class Transformer(nn.Module):
         # Token embeddings
         x = self.embed_tokens(input_ids)
         
-        # Generate position_ids if not provided
-        if position_ids is None:
-            if kv_cache is not None and kv_cache[0] is not None:
-                # For generation: position = past_length
-                if self.config.model_type == "mla":
-                    past_length = kv_cache[0][0].shape[1]  # c_kv shape
-                else:
-                    past_length = kv_cache[0][0].shape[2]  # k shape
-                position_ids = torch.arange(past_length, past_length + T, device=input_ids.device)
+        # Generate position_ids if not provided. During incremental generation
+        # the new token's absolute position is `past_length + i`, where
+        # past_length is read from the cache shape of layer 0:
+        #   MLA      : c_kv is [B, T_past, d_c]            -> dim 1
+        #   Hybrid   : k    is [B, n_kv_heads, T_past, dh] -> dim 2
+        # On the prefill pass (no cache yet) we leave position_ids as None and
+        # let the per-layer RoPE module derive positions from sequence length.
+        if position_ids is None and kv_cache is not None and kv_cache[0] is not None:
+            if self.config.model_type == "mla":
+                past_length = kv_cache[0][0].shape[1]
             else:
-                position_ids = None  # RoPE will handle it
+                past_length = kv_cache[0][0].shape[2]
+            position_ids = torch.arange(past_length, past_length + T, device=input_ids.device)
         
         # Process through layers
         new_cache = [] if use_cache else None

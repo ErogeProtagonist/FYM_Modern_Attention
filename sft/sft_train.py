@@ -14,14 +14,14 @@ Features:
 Usage:
     # Full fine-tuning on local GPU
     python sft_train.py \\
-        --checkpoint ../Checkpoints/hybrid_19073.pt \\
+        --checkpoint ../Checkpoints/hybrid_19072.pt \\
         --data_dir sft_data \\
         --batch_size 4 \\
         --epochs 3
-    
+
     # Lower memory with gradient accumulation
     python sft_train.py \\
-        --checkpoint ../Checkpoints/mla_19073.pt \\
+        --checkpoint ../Checkpoints/mla_19072.pt \\
         --data_dir sft_data \\
         --batch_size 2 \\
         --grad_accum 8
@@ -32,8 +32,10 @@ import sys
 import json
 import math
 import time
+import queue
 import argparse
 import platform
+import threading
 from dataclasses import asdict
 
 # Add parent directory to path for models import
@@ -87,9 +89,6 @@ def get_gpu_profile():
 # =============================================================================
 # ASYNC PREFETCHING (same as train_edge.py)
 # =============================================================================
-
-import threading
-import queue
 
 class PrefetchedWrapper:
     """

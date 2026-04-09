@@ -33,7 +33,7 @@ swa-mla-500m/
 │   └── rope.py                # Rotary Positional Embeddings (standard + decoupled)
 ├── scripts/                   # Training, inference, evaluation
 │   ├── train_edge.py          # DDP training (H100/H200/B200)
-│   ├── inference.py           # Portable inference + memory benchmarking
+│   ├── inference.py           # Portable inference (interactive + single-prompt)
 │   ├── evaluate.py            # lm-eval-harness wrapper (HellaSwag/ARC/PIQA)
 │   ├── check_kv_cache_shapes.py  # KV-cache shape sanity check
 │   ├── plot_kv_cache.py       # Cache scaling figure
@@ -43,11 +43,13 @@ swa-mla-500m/
 │   ├── sft_data_prep.py       # Download & prepare smol-smoltalk dataset
 │   └── sft_train.py           # SFT training with ChatML format
 ├── tests/                     # Parity / equivalence tests
+│   ├── parity_hybrid.py       # Train-mode vs inference-mode logit parity
+│   └── verify_swa.py          # SWA cache shape sanity check
 └── learning-experiments/      # Notebooks and exploratory work (reference only)
 ```
 
 Trained checkpoints live **outside** the repo at `../Checkpoints/`
-(`hybrid_19073.pt` and `mla_19073.pt`).
+(`hybrid_19072.pt` and `mla_19072.pt`).
 
 ---
 
@@ -76,7 +78,7 @@ python sft_data_prep.py --output_dir sft_data
 
 # Step 2: Fine-tune pretrained model
 python sft_train.py \
-    --checkpoint ../../Checkpoints/hybrid_19073.pt \
+    --checkpoint ../../Checkpoints/hybrid_19072.pt \
     --data_dir sft_data \
     --batch_size 16 \
     --epochs 3
@@ -88,10 +90,10 @@ python sft_train.py \
 cd scripts
 
 # Interactive mode
-python inference.py --checkpoint ../../Checkpoints/hybrid_19073.pt --interactive
+python inference.py --checkpoint ../../Checkpoints/hybrid_19072.pt --interactive
 
-# Benchmark memory + speed
-python inference.py --checkpoint ../../Checkpoints/mla_19073.pt --benchmark
+# Single prompt
+python inference.py --checkpoint ../../Checkpoints/mla_19072.pt --prompt "Hello, I am"
 ```
 
 ---
@@ -122,13 +124,13 @@ Using **smol-smoltalk** from HuggingFace — specifically designed for sub-1B mo
 
 ### Training Optimizations
 - **Auto-optimization**: Detects GPU (B200/H200/H100/3090) and adjusts batch size + checkpointing
-- **Block mask caching**: 10x speedup for FlexAttention sliding window
+- **FlashAttention-2 native sliding window**: training SWA layers use `window_size=(window-1, 0)`, no Python-side mask construction
 - **Fused SwiGLU FFN**: Single linear + chunk instead of two projections
 - **Selective gradient checkpointing**: Alternating layers for memory/speed balance
 
 ### Dual-Path Architecture
-- **Training**: FlexAttention/FlashAttention for maximum throughput
-- **Inference**: Naive PyTorch for portability (works on any GPU/CPU)
+- **Training**: FlashAttention-2 (`flash_attn` package) with native sliding window
+- **Inference**: PyTorch SDPA for portability — works on any GPU/CPU (SDPA still dispatches to FlashAttention-2 on Ampere+)
 
 ---
 
