@@ -327,6 +327,8 @@ def main():
     # Training
     parser.add_argument("--epochs", type=int, default=3,
                         help="Number of training epochs")
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help="Stop after N optimizer steps (overrides epoch end)")
     parser.add_argument("--batch_size", type=int, default=None,
                         help="Micro batch size (auto-detected if --auto_optimize)")
     parser.add_argument("--grad_accum", type=int, default=None,
@@ -450,6 +452,8 @@ def main():
     # Calculate steps (use inner loader for len since wrapper doesn't have it)
     steps_per_epoch = len(train_loader_inner) // grad_accum
     total_steps = steps_per_epoch * args.epochs
+    if args.max_steps is not None:
+        total_steps = min(total_steps, args.max_steps)
     effective_batch_size = args.batch_size * grad_accum
     
     print(f"\n{'='*60}")
@@ -617,7 +621,13 @@ def main():
                         'optimizer': optimizer.state_dict()
                     }, ckpt_path)
                     print(f"  -> checkpoint saved to {ckpt_path}")
-    
+
+                if args.max_steps is not None and step >= args.max_steps:
+                    print(f"Reached --max_steps={args.max_steps}; stopping.")
+                    break
+        if args.max_steps is not None and step >= args.max_steps:
+            break
+
     # Save final checkpoint
     final_path = os.path.join(args.output_dir, f"sft_{config.model_type}_final.pt")
     torch.save({
