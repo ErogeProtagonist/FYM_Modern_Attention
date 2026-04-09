@@ -1,4 +1,4 @@
-# FYM_Modern_Attention
+# swa-mla-500m
 
 **Efficiency at the Edge: Hybrid Sparsity vs. Latent Compression in 500M Transformers**
 
@@ -8,34 +8,46 @@ Comparative study of two state-of-the-art attention mechanisms for edge deployme
 
 ## Results
 
-| Model | Final Val Loss | Throughput (2x B200) | Training Cost |
-|-------|----------------|----------------------|---------------|
-| **Hybrid SWA+GQA** | 2.7207 | ~364k tok/sec | ~$76 |
-| **MLA** | 2.7290 | ~187k tok/sec | ~$150 |
-| **Δ Gap** | **0.0083** | - | **$226 total** |
+| Model | Final Val Loss | Throughput (2x B200) |
+|-------|----------------|----------------------|
+| **Hybrid SWA+GQA** | 2.7207 | ~364k tok/sec |
+| **MLA** | 2.7290 | ~187k tok/sec |
+| **Δ Gap** | **0.0083** | - |
 
-**Key Finding**: Both architectures achieve equivalent language modelling quality (~2.72 loss), but MLA offers **~60% KV cache reduction** for inference on memory-constrained devices.
+**Key Finding**: Both architectures reach equivalent quality (~2.72 val loss
+and within-noise on HellaSwag/ARC/PIQA). They differ in how they manage the
+inference KV cache: Hybrid truncates context via SWA, MLA compresses every
+token into a shared latent — a trade-off between forgetting and full-context
+preservation, not a single-axis winner.
 
 ---
 
 ## Project Structure
 
 ```
-yadda/
-├── models/              # Core model implementations
-│   ├── attention.py     # Hybrid SWA + MLA attention mechanisms
-│   ├── transformer.py   # Transformer with selective checkpointing
-│   ├── config.py        # 500M model configurations
-│   └── rope.py          # Rotary Positional Embeddings (standard + decoupled)
-├── scripts/             # Pre-training scripts
-│   ├── train_edge.py    # DDP training (H100/H200/B200)
-│   ├── inference.py     # Portable inference + benchmarking
-│   └── edu_fineweb10B.py # FineWeb-Edu dataset tokenization
-├── sft/                 # Supervised Fine-Tuning
-│   ├── sft_data_prep.py # Download & prepare smol-smoltalk dataset
-│   └── sft_train.py     # SFT training with ChatML format
-└── archive/             # Old experiments (reference only)
+swa-mla-500m/
+├── models/                    # Core model implementations
+│   ├── attention.py           # Hybrid SWA+GQA + MLA attention mechanisms
+│   ├── transformer.py         # Transformer with selective checkpointing
+│   ├── config.py              # 500M model configurations
+│   └── rope.py                # Rotary Positional Embeddings (standard + decoupled)
+├── scripts/                   # Training, inference, evaluation
+│   ├── train_edge.py          # DDP training (H100/H200/B200)
+│   ├── inference.py           # Portable inference + memory benchmarking
+│   ├── evaluate.py            # lm-eval-harness wrapper (HellaSwag/ARC/PIQA)
+│   ├── check_kv_cache_shapes.py  # KV-cache shape sanity check
+│   ├── plot_kv_cache.py       # Cache scaling figure
+│   ├── plot_val_loss.py       # Pre-training loss curve figure
+│   └── edu_fineweb10B.py      # FineWeb-Edu dataset tokenization
+├── sft/                       # Supervised Fine-Tuning
+│   ├── sft_data_prep.py       # Download & prepare smol-smoltalk dataset
+│   └── sft_train.py           # SFT training with ChatML format
+├── tests/                     # Parity / equivalence tests
+└── learning-experiments/      # Notebooks and exploratory work (reference only)
 ```
+
+Trained checkpoints live **outside** the repo at `../Checkpoints/`
+(`hybrid_19073.pt` and `mla_19073.pt`).
 
 ---
 
@@ -64,7 +76,7 @@ python sft_data_prep.py --output_dir sft_data
 
 # Step 2: Fine-tune pretrained model
 python sft_train.py \
-    --checkpoint ../checkpoints/hybrid_19073.pt \
+    --checkpoint ../../Checkpoints/hybrid_19073.pt \
     --data_dir sft_data \
     --batch_size 16 \
     --epochs 3
@@ -76,10 +88,10 @@ python sft_train.py \
 cd scripts
 
 # Interactive mode
-python inference.py --checkpoint ../checkpoints/hybrid_19073.pt --interactive
+python inference.py --checkpoint ../../Checkpoints/hybrid_19073.pt --interactive
 
 # Benchmark memory + speed
-python inference.py --checkpoint ../checkpoints/mla_19073.pt --benchmark
+python inference.py --checkpoint ../../Checkpoints/mla_19073.pt --benchmark
 ```
 
 ---

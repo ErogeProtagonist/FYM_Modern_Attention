@@ -13,7 +13,7 @@ nvidia-smi --query-gpu=name,memory.total --format=csv
 echo ""
 
 # Navigate to code
-cd ~/yadda
+cd ~/swa-mla-500m
 
 # Quick 100-step MLA test with torch.compile
 echo "Starting MLA validation (100 steps)..."
