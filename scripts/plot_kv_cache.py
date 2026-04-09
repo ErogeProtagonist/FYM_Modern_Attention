@@ -48,9 +48,10 @@ def main() -> None:
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper left", frameon=False)
 
-    # Annotate ratio at each context length.
+    # Annotate the MLA/Hybrid ratio at each context length, matching the
+    # table convention in FYP_thoughts.md ("Hybrid is N× smaller").
     for ctx, h, m in zip(h_ctx, h_mb, m_mb):
-        ratio = h / m if m > 0 else float("nan")
+        ratio = m / h if h > 0 else float("nan")
         ax.annotate(
             f"{ratio:.1f}x",
             xy=(ctx, max(h, m)),
