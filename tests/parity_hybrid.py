@@ -34,6 +34,7 @@ import torch
 # Add parent directory so `models` is importable when run as a script
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from models.attention import FLASH_ATTN_AVAILABLE
 from models.config import ModelConfig
 from models.transformer import Transformer
 
@@ -68,22 +69,37 @@ def main():
         "--dtype",
         default="float32",
         choices=["float32", "bfloat16", "float16"],
-        help="float32 gives the cleanest comparison; bf16 matches deployment.",
+        help="float32 gives the cleanest comparison; bf16 matches deployment. "
+             "Auto-promoted to bfloat16 if flash_attn is installed.",
     )
     parser.add_argument("--seq_len", type=int, default=512)
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument(
-        "--rtol", type=float, default=1e-4,
-        help="Relative tolerance for the allclose check.",
+        "--rtol", type=float, default=None,
+        help="Relative tolerance (default: 1e-4 fp32, 1e-2 bf16).",
     )
     parser.add_argument(
-        "--atol", type=float, default=1e-4,
-        help="Absolute tolerance for the allclose check.",
+        "--atol", type=float, default=None,
+        help="Absolute tolerance (default: 1e-4 fp32, 1e-2 bf16).",
     )
     args = parser.parse_args()
 
+    # flash_attn_func rejects float32. When it's installed the train-mode
+    # model dispatches to it, so we have to run the comparison in bf16.
+    if FLASH_ATTN_AVAILABLE and args.dtype == "float32":
+        print("flash_attn detected -- promoting dtype float32 -> bfloat16")
+        print("(flash_attn_func only supports fp16/bf16; this is the meaningful")
+        print(" comparison anyway since training uses bf16.)\n")
+        args.dtype = "bfloat16"
+
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[args.dtype]
+
+    # Default tolerances depend on dtype: bf16 has a much larger noise floor.
+    if args.rtol is None:
+        args.rtol = 1e-4 if args.dtype == "float32" else 1e-2
+    if args.atol is None:
+        args.atol = 1e-4 if args.dtype == "float32" else 1e-2
 
     print(f"Loading checkpoint: {args.checkpoint}")
     print(f"Device: {args.device}  dtype: {args.dtype}\n")
@@ -122,11 +138,12 @@ def main():
     print(f"Mean abs diff  : {mean_diff:.3e}")
     print(f"allclose       : {allclose}  (rtol={args.rtol}, atol={args.atol})")
 
-    if max_diff < 1e-3:
-        print("\nPASS  -- well within float accumulation noise; the post-Bug-5")
-        print("        inference path is numerically equivalent to training.")
+    pass_threshold = 1e-3 if args.dtype == "float32" else 5e-2
+    if max_diff < pass_threshold:
+        print(f"\nPASS  -- max diff < {pass_threshold:.0e} ({args.dtype} noise floor);")
+        print("        the post-Bug-5 inference path is numerically equivalent to training.")
     else:
-        print("\nFAIL  -- max diff exceeds 1e-3; investigate.")
+        print(f"\nFAIL  -- max diff exceeds {pass_threshold:.0e}; investigate.")
         sys.exit(1)
 
 

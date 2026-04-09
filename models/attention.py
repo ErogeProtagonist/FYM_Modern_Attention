@@ -223,42 +223,30 @@ class NaiveHybridAttention(nn.Module):
         return mask
 
 
-class FlashSWAHybridAttention(nn.Module):
+class FlashSWAHybridAttention(NaiveHybridAttention):
     """
     Hybrid attention using FlashAttention-2's native sliding window.
 
-    Uses flash_attn_func with the window_size parameter for O(n * window)
-    complexity, plus Grouped Query Attention (GQA) where multiple query heads
-    share fewer KV heads. This is the production training kernel; on hardware
-    without flash_attn the factory falls back to NaiveHybridAttention (SDPA).
+    Subclass of NaiveHybridAttention. Inherits __init__, all projections,
+    the cached vectorized mask helper, and the SDPA inference path. The only
+    thing this class overrides is the *training* forward, where it dispatches
+    to flash_attn_func with native window_size for O(n * window) complexity.
 
-    Requires: pip install flash-attn (H100/A100/B200)
+    Any call with use_cache=True or a non-None kv_cache (i.e. generation,
+    lm-eval-harness with cache, etc.) falls through to the parent's SDPA path,
+    which already handles GQA, the rolling window cache, and dtype-aware mask
+    construction.
+
+    Requires: pip install flash-attn (H100/A100/B200). On hardware without
+    flash_attn the factory picks NaiveHybridAttention directly so this class
+    is never instantiated.
     """
-    
+
     def __init__(self, config: ModelConfig, layer_idx: int):
-        super().__init__()
-        
         if not FLASH_ATTN_AVAILABLE:
             raise RuntimeError("flash-attn not available. Install with: pip install flash-attn")
-            
-        self.config = config
-        self.layer_idx = layer_idx
-        self.is_global = config.is_global_layer(layer_idx)
-        
-        self.n_heads = config.n_heads
-        self.n_kv_heads = config.n_kv_heads
-        self.n_rep = config.n_rep
-        self.head_dim = config.head_dim
-        self.window_size = config.window_size
-        
-        # GQA: Separate Q and KV projections
-        self.q_proj = nn.Linear(config.d_model, config.n_heads * config.head_dim, bias=False)
-        self.kv_proj = nn.Linear(config.d_model, 2 * config.n_kv_heads * config.head_dim, bias=False)
-        self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
-        
-        self.rope = RotaryEmbedding(self.head_dim, config.block_size, config.rope_base)
-        self.out_proj.RESIDUAL_SCALE_INIT = True
-        
+        super().__init__(config, layer_idx)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -266,107 +254,49 @@ class FlashSWAHybridAttention(nn.Module):
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        # flash_attn_func has no KV-cache support, so any cached path delegates
+        # to NaiveHybridAttention.forward (SDPA + cached vectorized mask).
+        if kv_cache is not None or use_cache:
+            return super().forward(x, position_ids, kv_cache, use_cache)
+
+        # Training fast path
+        assert flash_attn_func is not None  # guaranteed by __init__
         B, S, D = x.shape
-        
-        # GQA Projections
+
         q = self.q_proj(x)
         kv = self.kv_proj(x)
         k, v = kv.chunk(2, dim=-1)
-        
-        # Reshape: (B, S, D) -> (B, S, nh, hd) for flash_attn format
-        q = q.view(B, S, self.n_heads, self.head_dim)
-        k = k.view(B, S, self.n_kv_heads, self.head_dim)
-        v = v.view(B, S, self.n_kv_heads, self.head_dim)
 
-        # Apply RoPE (RoPE needs (B, nh, S, hd) layout)
-        q = q.transpose(1, 2)  # (B, n_heads, S, hd)
-        k = k.transpose(1, 2)  # (B, n_kv_heads, S, hd)
+        # Reshape into per-head layout. RoPE needs (B, nh, S, hd).
+        q = q.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)
+
         q, k = self.rope(q, k, position_ids)
 
-        if kv_cache is not None or use_cache:
-            # Inference fallback: SDPA (flash_attn doesn't support KV cache directly).
-            # Cache stores tensors at n_kv_heads — expansion to n_heads happens
-            # AFTER the cache write, so the cached tensors are n_rep× smaller.
-            # q is already (B, n_heads, S, hd); k is (B, n_kv_heads, S, hd).
-            v_inf = v.transpose(1, 2)  # (B, n_kv_heads, S, hd)
+        # GQA: expand KV heads to match Q before the flash kernel.
+        if self.n_rep > 1:
+            k = k.repeat_interleave(self.n_rep, dim=1)
+            v = v.repeat_interleave(self.n_rep, dim=1)
 
-            if kv_cache is not None:
-                past_k, past_v = kv_cache
-                k = torch.cat([past_k, k], dim=2)
-                v_inf = torch.cat([past_v, v_inf], dim=2)
+        # flash_attn_func wants (B, S, nh, hd).
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
 
-            if use_cache:
-                if not self.is_global:
-                    if k.shape[2] > self.window_size:
-                        k_cache = k[:, :, -self.window_size:, :]
-                        v_cache = v_inf[:, :, -self.window_size:, :]
-                    else:
-                        k_cache = k
-                        v_cache = v_inf
-                    new_cache = (k_cache, v_cache)
-                else:
-                    new_cache = (k, v_inf)
-            else:
-                new_cache = None
-
-            # Expand KV heads for the attention compute (NOT cached)
-            if self.n_rep > 1:
-                k_attn = k.repeat_interleave(self.n_rep, dim=1)
-                v_attn = v_inf.repeat_interleave(self.n_rep, dim=1)
-            else:
-                k_attn, v_attn = k, v_inf
-
-            # Use SDPA for inference
-            if self.is_global:
-                out = F.scaled_dot_product_attention(q, k_attn, v_attn, is_causal=True)
-            else:
-                kv_len = k_attn.shape[2]
-                mask = self._make_sliding_window_mask(q.shape[2], kv_len, x.device)
-                out = F.scaled_dot_product_attention(q, k_attn, v_attn, attn_mask=mask)
-
-            out = out.transpose(1, 2).contiguous().view(B, S, D)
+        if self.is_global:
+            out = flash_attn_func(q, k, v, causal=True)
         else:
-            # Training: use flash_attn with native sliding window.
-            # Keep the explicit GQA expansion + (B, S, nh, hd) layout — bit-identical
-            # to before this fix.
-            if self.n_rep > 1:
-                k = k.repeat_interleave(self.n_rep, dim=1)
-                v_expanded = v.transpose(1, 2).repeat_interleave(self.n_rep, dim=1)
-            else:
-                v_expanded = v.transpose(1, 2)
+            # window_size=(left, right); (window-1, 0) is the causal sliding window.
+            out = flash_attn_func(
+                q, k, v,
+                causal=True,
+                window_size=(self.window_size - 1, 0),
+            )
 
-            q = q.transpose(1, 2)  # Back to (B, S, nh, hd) for flash_attn
-            k = k.transpose(1, 2)
-            v = v_expanded.transpose(1, 2)  # (B, S, n_heads, hd)
-
-            new_cache = None
-
-            if self.is_global:
-                # Global layer: full causal attention
-                out = flash_attn_func(q, k, v, causal=True)
-            else:
-                # Local layer: sliding window attention
-                # window_size=(left, right): (window-1, 0) for causal sliding window
-                out = flash_attn_func(
-                    q, k, v,
-                    causal=True,
-                    window_size=(self.window_size - 1, 0)
-                )
-
-            out = out.view(B, S, D)
-        
+        out = out.view(B, S, D)
         out = self.out_proj(out)
-        return out, new_cache
-    
-    def _make_sliding_window_mask(self, q_len, kv_len, device):
-        """Fallback mask for inference."""
-        mask = torch.full((q_len, kv_len), float("-inf"), device=device)
-        for i in range(q_len):
-            abs_pos = kv_len - q_len + i
-            start = max(0, abs_pos - self.window_size + 1)
-            end = abs_pos + 1
-            mask[i, start:end] = 0.0
-        return mask
+        return out, None
 
 
 # ============================================================================
