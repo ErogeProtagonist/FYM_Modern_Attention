@@ -20,7 +20,7 @@ class ModelConfig:
     d_model: int = 1024          # Hidden dimension
     n_layers: int = 24           # Number of transformer layers
     n_heads: int = 16            # Number of query attention heads
-    n_kv_heads: int = 4          # Number of KV heads (for GQA). If None, uses n_heads (MHA)
+    n_kv_heads: int = 4          # Number of KV heads for GQA (Hybrid) or full MHA count (MLA)
     head_dim: int = 64           # Dimension per head (d_model // n_heads)
     vocab_size: int = 50304      # Vocabulary size (padded for efficiency)
     block_size: int = 2048       # Maximum sequence length
@@ -34,12 +34,12 @@ class ModelConfig:
     
     # MLA-specific (DeepSeek-style)
     kv_lora_rank: int = 512          # Latent compression dimension (d_c)
-    q_lora_rank: int = 384           # Query compression dimension (optional)
+    q_lora_rank: int = 384           # Unused — kept for checkpoint backward compat
     rope_dim: int = 64               # Decoupled RoPE dimension (d_R)
     
     # Shared attention settings
     rope_base: float = 10000.0       # RoPE base frequency
-    rope_scaling: float = 1.0        # RoPE scaling factor for extended context
+    rope_scaling: float = 1.0        # Unused — kept for checkpoint backward compat
     
     # Initialization
     init_std: float = 0.006          # DeepSeek-style small init for residual projections
