@@ -177,11 +177,3 @@ class RotaryEmbedding(nn.Module):
             self.sin_cached.to(x.dtype),
             position_ids,
         )
-    
-    def extend_if_needed(self, seq_len: int, device: torch.device):
-        """Extend cached frequencies if sequence exceeds current max."""
-        if seq_len > self.max_seq_len:
-            self.max_seq_len = seq_len * 2  # Double to avoid frequent recomputes
-            cos, sin = precompute_freqs_cis(self.dim, self.max_seq_len, self.base, device)
-            self.cos_cached = cos
-            self.sin_cached = sin

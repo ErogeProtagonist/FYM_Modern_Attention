@@ -155,9 +155,8 @@ class NaiveHybridAttention(nn.Module):
             # Efficiently get or create mask (dtype must match q for bf16/fp16 SDPA)
             mask = self._get_sliding_window_mask(q_len, kv_len, q.device, q.dtype)
             
-            # Use SDPA with explicit mask
-            # Note: FlashAttention 2 supports slight window attention via specialized kernels,
-            # but standard sdp_kernel might fall back to efficient_attention or math if mask is dense-ish.
+            # SDPA with explicit mask (inference/fallback path). Training uses
+            # FlashSWAHybridAttention with native window_size instead.
             with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.FLASH_ATTENTION, torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION, torch.nn.attention.SDPBackend.MATH]):
                 out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         
@@ -400,8 +399,7 @@ class NaiveMLAttention(nn.Module):
         # [all_k, all_v]. Getting this wrong silently produces wrong outputs
         # (the model generates gibberish even with reasonable training loss)
         # because the linear layer's weight order corresponds to the interleaved
-        # layout. See Training_Run_Summary_Internal.md section 2.B for the
-        # original incident — the "MLA gibberish" bug fixed in commit a13cd78.
+        # layout — the "MLA gibberish" bug fixed in commit a13cd78.
         kv_content = self.kv_up_proj(c_kv)  # (B, S_kv, 2 * n_heads * head_dim)
         S_kv = kv_content.shape[1]
         kv_content = kv_content.view(B, S_kv, self.n_heads, 2 * self.head_dim).transpose(1, 2)

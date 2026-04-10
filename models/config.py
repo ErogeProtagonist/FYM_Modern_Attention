@@ -53,7 +53,6 @@ class ModelConfig:
         self.head_dim = self.d_model // self.n_heads
         self.n_rep = self.n_heads // self.n_kv_heads  # Number of times to repeat KV heads
 
-        
     @property
     def ffn_hidden_dim(self) -> int:
         """Compute FFN hidden dimension (SwiGLU uses 2/3 * 4 * d_model ≈ 2.667 * d_model)."""

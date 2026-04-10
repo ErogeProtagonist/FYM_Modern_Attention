@@ -1,10 +1,9 @@
 """
 Training Script for Hybrid SWA and MLA Transformers.
 
-Based on the proven train_gpt2.py but adapted for:
-- Both Hybrid (Gemma-style) and MLA (DeepSeek-style) models
-- Automatic kernel selection based on hardware
-- Integration with edu_fineweb10B.py data pipeline
+Supports both Hybrid (Gemma-style) and MLA (DeepSeek-style) models with
+automatic GPU profiling (batch size, gradient checkpointing) and DDP
+multi-GPU training.  Data: edu_fineweb10B shards (see scripts/edu_fineweb10B.py).
 
 Usage:
     # Single GPU
@@ -40,10 +39,8 @@ import tiktoken
 from models.config import ModelConfig, HYBRID_500M, MLA_500M
 from models.transformer import Transformer
 
-
-
 # =============================================================================
-# DATA LOADING (from train_gpt2.py)
+# DATA LOADING
 # =============================================================================
 
 def load_tokens(filename):
