@@ -215,10 +215,13 @@ class SwaMlaLM(LM):
 
         return results
 
-    def loglikelihood_rolling(self, requests: list) -> List[Tuple[float]]:
+    def loglikelihood_rolling(self, requests: list) -> List[float]:
         """
         Compute rolling log-likelihood (for perplexity).
         Processes the entire text as if context = EOT.
+
+        Returns a plain float per request (the harness's process_results
+        wraps it with word/byte counts for weighted_perplexity).
         """
         results = []
 
@@ -248,7 +251,7 @@ class SwaMlaLM(LM):
                 token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
                 total_ll += token_log_probs.sum().item()
 
-            results.append((total_ll,))
+            results.append(total_ll)
 
         return results
 

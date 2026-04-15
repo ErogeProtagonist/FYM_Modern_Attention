@@ -17,9 +17,9 @@ class ModelConfig:
     model_type: Literal["hybrid", "mla"] = "hybrid"
     
     # Core architecture (same for both models to ensure fair comparison)
-    d_model: int = 1024          # Hidden dimension
+    d_model: int = 1280          # Hidden dimension
     n_layers: int = 24           # Number of transformer layers
-    n_heads: int = 16            # Number of query attention heads
+    n_heads: int = 20            # Number of query attention heads
     n_kv_heads: int = 4          # Number of KV heads for GQA (Hybrid) or full MHA count (MLA)
     head_dim: int = 64           # Dimension per head (d_model // n_heads)
     vocab_size: int = 50304      # Vocabulary size (padded for efficiency)
