@@ -1,0 +1,14 @@
+# Core runtime (training, inference, eval)
+torch>=2.5
+tiktoken
+numpy
+tqdm
+datasets
+matplotlib
+
+# Evaluation harness (optional — only needed for scripts/evaluate.py lm-eval benchmarks)
+# lm-eval
+
+# Training-only fast path on supported GPUs (H100/A100/B200). Not installable on
+# Windows / consumer GPUs; the code falls back to the SDPA Naive path when absent.
+# flash-attn

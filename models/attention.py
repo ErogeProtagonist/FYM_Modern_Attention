@@ -2,16 +2,41 @@
 Attention Implementations for Hybrid SWA and MLA Transformers.
 
 This module provides 3 attention variants:
-- NaiveHybridAttention: SDPA-based Hybrid (used for inference and as a training
-  fallback when flash_attn is unavailable)
-- FlashSWAHybridAttention: Optimized training for Hybrid via flash_attn package
-- NaiveMLAttention: SDPA-based MLA used for both training and inference
-  (the FlashMLA package is inference-only and didn't help training, so we use
-  SDPA for everything; the no-cache forward dispatches to FlashAttention via
-  the SDPA backend selector)
 
-The factory function `get_attention()` selects the right implementation based
-on hardware (flash_attn availability) and mode.
+- ``NaiveHybridAttention``
+      SDPA-based Hybrid SWA + GQA. Used for inference and as a training
+      fallback when ``flash_attn`` is unavailable (e.g. Windows / 3090).
+      Handles the rolling KV-cache window and the additive sliding-window
+      mask used by the manual SDPA path.
+
+- ``FlashSWAHybridAttention(NaiveHybridAttention)``
+      Training-only fast path. Overrides the *non-cached* forward to call
+      ``flash_attn_func`` with native ``window_size=(window-1, 0)``. Any
+      cached call (``use_cache=True`` or a non-None ``kv_cache``) delegates
+      straight back to the parent's SDPA path, so we never need to teach
+      flash_attn about KV caches.
+
+- ``NaiveMLAttention``
+      DeepSeek-style Multi-head Latent Attention. Runs everywhere (no
+      flash_attn dependency). Two internal branches inside the forward:
+        * fast path : ``use_cache=False`` and ``kv_cache is None`` -> SDPA
+          with ``is_causal=True`` (training, and lm-eval-harness
+          loglikelihood use this).
+        * slow path : anything else -> manual ``matmul -> triu -> softmax
+          -> matmul``. Needed because cached generation has ``q_len=1``
+          while ``k_len`` is the full cached context, which SDPA's
+          ``is_causal`` flag gets wrong.
+
+Dispatch (``get_attention`` at the bottom of this file):
+
+    model_type  mode='train' + flash_attn     mode='train' w/o flash_attn    mode='inference'
+    hybrid      FlashSWAHybridAttention       NaiveHybridAttention           NaiveHybridAttention
+    mla         NaiveMLAttention              NaiveMLAttention               NaiveMLAttention
+
+The parity tests in ``tests/parity_hybrid.py`` and ``tests/parity_mla.py``
+exercise these branches against each other to confirm the fast path and
+the slow path produce numerically equivalent logits (bf16 noise-floor
+equivalence on GPU, fp32 tight-tolerance equivalence on CPU).
 """
 
 import math
@@ -114,6 +139,8 @@ class NaiveHybridAttention(nn.Module):
         # Handle KV cache for generation. The cache stores tensors at
         # n_kv_heads (NOT n_heads), so the GQA cache is n_rep× smaller.
         # Query-side broadcasting via repeat_interleave happens AFTER this block.
+        # (Bug 5 fix: earlier versions cached at n_heads, defeating the whole
+        # point of GQA; see FYP_thoughts.md bug history.)
         if kv_cache is not None:
             past_k, past_v = kv_cache
             k = torch.cat([past_k, k], dim=2)
@@ -171,8 +198,9 @@ class NaiveHybridAttention(nn.Module):
     ) -> torch.Tensor:
         """
         Get cached mask or create one efficiently using vectorized ops.
-        Avoids slow Python loops. Mask dtype matches the attention tensors so
-        bf16/fp16 inference does not crash on the SDPA additive mask.
+        Avoids slow Python loops. Bug 4 fix: mask dtype matches the attention
+        tensors so bf16/fp16 inference does not crash on the SDPA additive
+        mask (an fp32 mask plus a bf16 query trips SDPA's dtype check).
         """
         # 1. Check if we can reuse the cached mask (Training scenario)
         if self.mask_cache is not None and \
@@ -362,28 +390,40 @@ class NaiveMLAttention(nn.Module):
             output, new_cache
         """
         B, S, D = x.shape
-        
+        # Naming convention in this forward:
+        #   S      = incoming query sequence length for this call
+        #   S_kv   = total cached key/value length after concat (S_kv >= S)
+        #   d_c    = kv_lora_rank (latent dim)
+        #   d_h    = head_dim (content half of each head's key/query)
+        #   d_R    = rope_dim  (decoupled RoPE half of each head's key/query)
+        # Queries carry (d_h + d_R) per head; keys the same via concat.
+
         # === Query Path ===
-        # Content query
-        q_content = self.q_proj(x)  # (B, S, n_heads * head_dim)
+        # Content query: (B, S, d_model) -> (B, n_heads, S, d_h)
+        q_content = self.q_proj(x)                                              # (B, S, n_heads * d_h)
         q_content = q_content.view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
-        
-        # Decoupled RoPE query
-        q_rope = self.q_rope_proj(x)  # (B, S, n_heads * rope_dim)
-        q_rope = q_rope.view(B, S, self.n_heads, self.rope_dim).transpose(1, 2)
+
+        # Decoupled RoPE query: (B, S, d_model) -> (B, n_heads, S, d_R), then RoPE in place.
+        q_rope = self.q_rope_proj(x)                                            # (B, S, n_heads * d_R)
+        q_rope = q_rope.view(B, S, self.n_heads, self.rope_dim).transpose(1, 2) # (B, n_heads, S, d_R)
         q_rope = self.rope_decoupled.forward_single(q_rope, position_ids)
-        
+
         # === Key-Value Path ===
-        # Compress to latent space
-        c_kv = self.kv_down_proj(x)  # (B, S, kv_lora_rank)
+        # Compress to the shared latent. This is the MLA memory win: we cache
+        # c_kv at d_c=512 instead of two full (n_heads * head_dim) tensors.
+        c_kv = self.kv_down_proj(x)  # (B, S, d_c)
         
-        # Decoupled RoPE key (shared across heads — DeepSeek's key MLA trick)
-        k_rope = self.k_rope_proj(x)  # (B, S, rope_dim)
-        k_rope = k_rope.unsqueeze(2)  # (B, S, 1, rope_dim)
-        k_rope = k_rope.transpose(1, 2)  # (B, 1, S, rope_dim)
+        # Decoupled RoPE key (shared across heads — DeepSeek's key MLA trick).
+        # The head dimension stays at 1 all the way through cache storage;
+        # we only expand to n_heads for the attention matmul at the bottom.
+        k_rope = self.k_rope_proj(x)      # (B, S, rope_dim)
+        k_rope = k_rope.unsqueeze(2)      # (B, S, 1, rope_dim)
+        k_rope = k_rope.transpose(1, 2)   # (B, 1, S, rope_dim)
         k_rope = self.rope_decoupled.forward_single(k_rope, position_ids)
-        # NOTE: do NOT expand to n_heads here — we cache the shared (B, 1, S, rope_dim)
-        # form and only broadcast for the attention matmul below.
+        # Bug 1 fix: do NOT expand to n_heads before caching. The cache must
+        # store the shared-across-heads form (B, 1, S, rope_dim). Earlier
+        # versions cached at (B, n_heads, S, rope_dim), which concatenated
+        # incorrectly on subsequent cached steps because the head dim grew.
 
         # Handle KV cache
         # In MLA, we cache the compressed c_kv and the (shared) RoPE key
@@ -395,17 +435,18 @@ class NaiveMLAttention(nn.Module):
         new_cache = (c_kv, k_rope) if use_cache else None
 
         # Up-project keys and values from latent space.
-        # CRITICAL: reshape BEFORE chunking. view(B, S, n_heads, 2*head_dim) then
-        # chunk(2, dim=-1) gives interleaved [k,v] per head, NOT contiguous
-        # [all_k, all_v]. Getting this wrong silently produces wrong outputs
-        # (the model generates gibberish even with reasonable training loss)
-        # because the linear layer's weight order corresponds to the interleaved
-        # layout — the "MLA gibberish" bug fixed in commit a13cd78.
-        kv_content = self.kv_up_proj(c_kv)  # (B, S_kv, 2 * n_heads * head_dim)
+        # Bug 6 fix: reshape BEFORE chunking. The correct order is
+        #   view(B, S, n_heads, 2*head_dim) -> transpose -> chunk(2, dim=-1),
+        # which gives [all_k_head_i, all_v_head_i] interleaved along the last
+        # dim in the way the linear weights were trained. Chunking first and
+        # reshaping after would produce silent garbage — the model generates
+        # gibberish at reasonable-looking training loss because the weight
+        # layout no longer matches what the op assumes.
+        kv_content = self.kv_up_proj(c_kv)                   # (B, S_kv, 2 * n_heads * head_dim)
         S_kv = kv_content.shape[1]
         kv_content = kv_content.view(B, S_kv, self.n_heads, 2 * self.head_dim).transpose(1, 2)
         # Shape: (B, n_heads, S_kv, 2 * head_dim)
-        k_content, v = kv_content.chunk(2, dim=-1)  # Each: (B, n_heads, S_kv, head_dim)
+        k_content, v = kv_content.chunk(2, dim=-1)           # each: (B, n_heads, S_kv, head_dim)
 
         # Expand k_rope across heads for the attention matmul only (after caching).
         # This is a view, not a copy — no extra memory allocated.
@@ -438,12 +479,16 @@ class NaiveMLAttention(nn.Module):
             scale = 1.0 / math.sqrt(self.head_dim + self.rope_dim)
             attn_weights = torch.matmul(q_full, k_full.transpose(-1, -2)) * scale
 
-            # Apply causal mask (match attn dtype so bf16/fp16 inference works)
+            # Apply causal mask. Bug 3 fix: dtype must match attn_weights —
+            # an fp32 mask added to a bf16 tensor is fine, but an fp32 mask
+            # *assigned into* a bf16 slot via SDPA would crash; here we do the
+            # add ourselves, so we just need the mask in the right dtype for
+            # the autograd graph to stay homogeneous in bf16/fp16 inference.
             S_q = q_full.shape[2]
             S_kv = k_full.shape[2]
             causal_mask = torch.triu(
                 torch.full((S_q, S_kv), float("-inf"), device=x.device, dtype=attn_weights.dtype),
-                diagonal=S_kv - S_q + 1
+                diagonal=S_kv - S_q + 1   # diagonal offset so q_len=1 still attends to all cached keys
             )
             attn_weights = attn_weights + causal_mask
 
