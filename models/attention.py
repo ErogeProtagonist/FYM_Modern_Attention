@@ -341,8 +341,9 @@ class NaiveMLAttention(nn.Module):
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         self.out_proj.RESIDUAL_SCALE_INIT = True
         
-        # RoPE for the decoupled positional embeddings
-        self.rope_content = RotaryEmbedding(config.head_dim, config.block_size, config.rope_base)
+        # RoPE for the decoupled positional embeddings. Only the decoupled
+        # q_rope/k_rope paths use RoPE; content queries/keys deliberately do
+        # not (this is the DeepSeek MLA design).
         self.rope_decoupled = RotaryEmbedding(self.rope_dim, config.block_size, config.rope_base)
         
     def forward(

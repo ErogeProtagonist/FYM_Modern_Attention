@@ -118,7 +118,7 @@ Using **smol-smoltalk** from HuggingFace — specifically designed for sub-1B mo
 ## Key Features
 
 ### Model Architecture
-- **536M parameters** with 24 layers, 1280 d_model, 20 query heads
+- **~500M parameters** with 24 layers, 1280 d_model, 20 query heads
 - **Hybrid**: 5:1 ratio of SWA (window=512) to Global GQA layers
 - **MLA**: Low-rank KV compression ($d_c$=512) with decoupled RoPE
 

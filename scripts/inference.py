@@ -22,29 +22,35 @@ from models.transformer import Transformer
 
 
 
-def load_model(checkpoint_path: str, device: str = "cuda") -> tuple:
+def load_model(
+    checkpoint_path: str,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
+) -> tuple:
     """
     Load a trained model from checkpoint.
-    
+
     Forces 'inference' mode to use naive attention implementations
-    that work on any hardware.
+    that work on any hardware. Casts the model to ``dtype`` so that
+    qualitative samples run on the same numerical path as evaluate.py
+    (bf16 by default — matches production inference).
     """
     print(f"Loading checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    
+
     # Reconstruct config from saved dict
     config_dict = checkpoint['config']
     config = ModelConfig(**config_dict)
-    
+
     # Create model in inference mode (forces naive kernels)
     model = Transformer(config, mode="inference")
-    
+
     # Handle checkpoints saved from compiled models (keys have '_orig_mod.' prefix)
     state_dict = checkpoint['model']
     if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
         print("Detected compiled model checkpoint, stripping '_orig_mod.' prefix...")
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
-    
+
     # Strip the legacy 'naive_impl.' prefix from older MLA checkpoints. They
     # were saved by the now-removed FlashMLAttention wrapper, which embedded
     # NaiveMLAttention as a sub-module called 'naive_impl'. New checkpoints
@@ -52,16 +58,16 @@ def load_model(checkpoint_path: str, device: str = "cuda") -> tuple:
     if any('.naive_impl.' in k for k in state_dict.keys()):
         print("Stripping legacy 'naive_impl.' prefix from MLA checkpoint...")
         state_dict = {k.replace('.naive_impl.', '.'): v for k, v in state_dict.items()}
-    
+
     # Load weights
     model.load_state_dict(state_dict)
-    model.to(device)
+    model.to(device=device, dtype=dtype)
     model.eval()
     
-    print(f"Loaded {config.model_type.upper()} model from step {checkpoint.get('step', 'unknown')}")
+    print(f"Loaded {config.model_type.upper()} model from step {checkpoint.get('step', 'unknown')} (dtype={dtype})")
     if 'val_loss' in checkpoint and checkpoint['val_loss'] is not None:
         print(f"Validation loss at checkpoint: {checkpoint['val_loss']:.4f}")
-    
+
     return model, config
 
 
@@ -144,7 +150,13 @@ def main():
                         help="Enter interactive generation mode")
     parser.add_argument("--device", type=str, default=None,
                         help="Device to use (auto-detected if not specified)")
+    parser.add_argument("--dtype", type=str, default="bfloat16",
+                        choices=["bfloat16", "float16", "float32"],
+                        help="Inference dtype. bf16 matches evaluate.py and production inference.")
     args = parser.parse_args()
+
+    dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
+    inference_dtype = dtype_map[args.dtype]
     
     # Auto-detect device
     if args.device is None:
@@ -160,7 +172,7 @@ def main():
     print(f"Using device: {device}")
     
     # Load model
-    model, config = load_model(args.checkpoint, device)
+    model, config = load_model(args.checkpoint, device, dtype=inference_dtype)
 
     # Interactive mode
     if args.interactive:

@@ -136,15 +136,22 @@ def main():
     diff = (logits_train - logits_infer).abs()
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()
+    # Argmax agreement is the metric greedy/top-k sampling actually cares
+    # about — two logit tensors can have a large max absolute diff in bf16
+    # and still agree on the top token at every position.
+    argmax_agree = (
+        logits_train.argmax(-1) == logits_infer.argmax(-1)
+    ).float().mean().item()
     allclose = torch.allclose(logits_train, logits_infer, rtol=args.rtol, atol=args.atol)
 
     print("\n" + "=" * 60)
     print("Hybrid train-mode vs inference-mode logit parity")
     print("=" * 60)
-    print(f"Logits shape   : {tuple(logits_train.shape)}")
-    print(f"Max abs diff   : {max_diff:.3e}")
-    print(f"Mean abs diff  : {mean_diff:.3e}")
-    print(f"allclose       : {allclose}  (rtol={args.rtol}, atol={args.atol})")
+    print(f"Logits shape      : {tuple(logits_train.shape)}")
+    print(f"Max abs diff      : {max_diff:.3e}")
+    print(f"Mean abs diff     : {mean_diff:.3e}")
+    print(f"Argmax agreement  : {argmax_agree * 100:.2f}%")
+    print(f"allclose          : {allclose}  (rtol={args.rtol}, atol={args.atol})")
 
     # Pass criteria depend on dtype:
     #   fp32 (Naive vs Naive on hardware without flash_attn): a single tight
