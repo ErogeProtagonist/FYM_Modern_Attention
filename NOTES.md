@@ -60,23 +60,23 @@ and `../Checkpoints/mla_19072.pt` (too large to track).
 
 The six numbered bugs referenced in code comments are:
 
-1. **k_rope caching shape.** `NaiveMLAttention` must cache the decoupled RoPE
-   key at `(B, 1, S, rope_dim)` and only broadcast to `n_heads` for the
-   attention matmul. Caching at `n_heads` concatenated incorrectly on
-   subsequent cached steps.
+1. **MLA kv_up_proj reshape order (Gibberish Bug).** Must be
+   `view(B, S, n_heads, 2*d_h) → transpose → chunk(2, dim=-1)`, not
+   chunk-then-reshape. The linear weights assume interleaved layout;
+   swapping produces gibberish at reasonable-looking training loss.
 2. *(evaluate.py dtype default — now bf16 by default, matches training.)*
 3. **MLA causal mask dtype.** The manual additive mask in the slow path
    must match `attn_weights.dtype` (bf16/fp16) or the graph stays mixed and
    fails under autocast inference.
 4. **Hybrid SWA mask dtype.** Same idea for the SDPA fallback path in
    `NaiveHybridAttention._get_sliding_window_mask`.
-5. **GQA cache size.** `NaiveHybridAttention` caches at `n_kv_heads`, not
+5. **MLA k_rope cache shape.** `NaiveMLAttention` must cache the decoupled
+   RoPE key at `(B, 1, S, rope_dim)` and only broadcast to `n_heads` for the
+   attention matmul. Caching at `n_heads` concatenated incorrectly on
+   subsequent cached steps.
+6. **GQA cache size.** `NaiveHybridAttention` caches at `n_kv_heads`, not
    `n_heads`. Expanding with `repeat_interleave` happens *after* the cache
    block. The old code cached at `n_heads`, defeating the whole GQA win.
-6. **MLA kv_up_proj reshape order.** Must be `view(B, S, n_heads, 2*d_h)
-   → transpose → chunk(2, dim=-1)`, not chunk-then-reshape. The linear
-   weights assume interleaved layout; swapping produces gibberish at
-   reasonable-looking training loss.
 
 ---
 

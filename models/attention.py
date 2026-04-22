@@ -139,8 +139,8 @@ class NaiveHybridAttention(nn.Module):
         # Handle KV cache for generation. The cache stores tensors at
         # n_kv_heads (NOT n_heads), so the GQA cache is n_rep× smaller.
         # Query-side broadcasting via repeat_interleave happens AFTER this block.
-        # (Bug 5 fix: earlier versions cached at n_heads, defeating the whole
-        # point of GQA; see FYP_thoughts.md bug history.)
+        # (Bug 6 fix: earlier versions cached at n_heads, defeating the whole
+        # point of GQA; see NOTES.md bug history.)
         if kv_cache is not None:
             past_k, past_v = kv_cache
             k = torch.cat([past_k, k], dim=2)
@@ -420,7 +420,7 @@ class NaiveMLAttention(nn.Module):
         k_rope = k_rope.unsqueeze(2)      # (B, S, 1, rope_dim)
         k_rope = k_rope.transpose(1, 2)   # (B, 1, S, rope_dim)
         k_rope = self.rope_decoupled.forward_single(k_rope, position_ids)
-        # Bug 1 fix: do NOT expand to n_heads before caching. The cache must
+        # Bug 5 fix: do NOT expand to n_heads before caching. The cache must
         # store the shared-across-heads form (B, 1, S, rope_dim). Earlier
         # versions cached at (B, n_heads, S, rope_dim), which concatenated
         # incorrectly on subsequent cached steps because the head dim grew.
@@ -435,7 +435,7 @@ class NaiveMLAttention(nn.Module):
         new_cache = (c_kv, k_rope) if use_cache else None
 
         # Up-project keys and values from latent space.
-        # Bug 6 fix: reshape BEFORE chunking. The correct order is
+        # Bug 1 fix: reshape BEFORE chunking. The correct order is
         #   view(B, S, n_heads, 2*head_dim) -> transpose -> chunk(2, dim=-1),
         # which gives [all_k_head_i, all_v_head_i] interleaved along the last
         # dim in the way the linear weights were trained. Chunking first and
