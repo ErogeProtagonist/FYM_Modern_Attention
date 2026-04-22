@@ -70,7 +70,7 @@ def main() -> None:
     ax_zoom.set_ylabel("Validation loss")
     ax_zoom.set_title(f"Zoom: step {zoom_start}+ (gap closure phase)")
     ax_zoom.grid(True, alpha=0.25)
-    ax_zoom.legend(loc="upper right", frameon=False)
+    ax_zoom.legend(loc="lower left", frameon=False)
 
     # Annotate final gap on the zoomed plot.
     final_step = h_steps[-1]
