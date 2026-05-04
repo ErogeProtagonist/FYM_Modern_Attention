@@ -29,8 +29,8 @@ so no flash_attn dependency — safe on a Windows / 3090 box):
 
       This exercises the parts of the code that only run during real cached
       generation:
-        - k_rope cached at (B, 1, S, rope_dim) — Bug 1 fix.
-        - kv_up_proj reshape-then-chunk — Bug 6 fix.
+        - k_rope cached at (B, 1, S, rope_dim) — Bug 5 fix.
+        - kv_up_proj reshape-then-chunk — Bug 1 fix.
         - triu additive mask for q_len=1, k_len=S.
         - position_ids derived from cache length in Transformer.forward.
 
